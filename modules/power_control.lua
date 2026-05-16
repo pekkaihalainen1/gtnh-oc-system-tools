@@ -260,7 +260,7 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.fill(cx, row, w - 4, 1, "─")
 
     -- ── Redstone section ──────────────────────────────────────────────────────
-    row = row + 1
+    row = row + 2
     gpu.setForeground(C_LABEL)
     gpu.set(cx, row, "REDSTONE  ")
     local badgeBg  = state.redstoneActive and 0xAA0000 or 0x222233
@@ -286,7 +286,7 @@ function M.drawUI(gpu, x, y, w, h)
     end
 
     local hist      = getCraftingHistory()
-    local histStart = row + 1
+    local histStart = row + 2
     local histEnd   = y + h - 3   -- leave room for footer + error
     local maxRows   = math.max(0, histEnd - histStart + 1)
     local startIdx  = math.max(1, #hist - maxRows + 1)
