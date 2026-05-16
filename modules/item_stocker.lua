@@ -504,7 +504,7 @@ function M.drawUI(gpu, x, y, w, h)
 
         -- Current stock hint
         gpu.setForeground(C_DIM)
-        gpu.set(x + 2, er + 6, "[Tab] Switch field  [Enter] Save  [Esc] Cancel  [Del] Remove item")
+        gpu.set(x + 2, er + 6, "[Enter] Next/Save  [Esc] Cancel  [Del] Remove item")
 
     else
         gpu.setForeground(C_DIM)
@@ -541,18 +541,14 @@ function M.handleKey(char, code)
             end
         elseif code == keyboard.keys.back then
             state.editorBuf = state.editorBuf:sub(1, -2)
-        elseif code == keyboard.keys.tab then
+        elseif code == keyboard.keys.enter then
             if state.editorField == "level" then
                 state.editorLevel = tonumber(state.editorBuf) or 0
                 state.editorBuf   = state._editorPerCycle or "1"
                 state.editorField = "perCycle"
             else
-                state._editorPerCycle = state.editorBuf
-                state.editorBuf       = tostring(state.editorLevel)
-                state.editorField     = "level"
+                closeEditor(true)
             end
-        elseif code == keyboard.keys.enter then
-            closeEditor(true)
         elseif code == keyboard.keys.escape then
             closeEditor(false)
         elseif code == keyboard.keys.delete then
