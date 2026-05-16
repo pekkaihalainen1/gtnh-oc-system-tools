@@ -283,8 +283,12 @@ if fail_count == 0 then
         svc:write(string.format([[
 local M = {}
 function M.start()
-    local shell = require("shell")
-    shell.execute(%q)
+    local thread = require("thread")
+    local t = thread.create(function()
+        local shell = require("shell")
+        shell.execute(%q)
+    end)
+    thread.detach(t)
 end
 function M.stop() end
 return M
