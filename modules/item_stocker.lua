@@ -257,6 +257,12 @@ function M.init(gpu, screenW, screenH)
         state.error = "No ME Interface found — connect one and restart"
     end
     rebuildStockedList()
+    -- force immediate pattern load on first update()
+    state.lastCheck = -math.huge
+    -- also load right now if ME is already available
+    if state.me then
+        pcall(refreshPatterns)
+    end
     return true  -- never fatal: power module must keep running
 end
 
@@ -268,9 +274,11 @@ function M.update()
         if component.isAvailable("me_interface") then
             state.me = component.me_interface
             state.error = nil
+            state.lastCheck = -math.huge
         elseif component.isAvailable("me_controller") then
             state.me = component.me_controller
             state.error = nil
+            state.lastCheck = -math.huge
         end
         return
     end
