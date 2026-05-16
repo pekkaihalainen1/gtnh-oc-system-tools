@@ -89,11 +89,18 @@ local function main()
     end
 
     -- Load config, injecting saved values back into each module
+    local filesystem = require("filesystem")
+    local firstRun = not filesystem.exists(CONFIG_PATH)
     cfg = config.load(CONFIG_PATH, defaults)
     for _, mod in ipairs(MODULES) do
         if cfg[mod.id] then
             mod.config = cfg[mod.id]
         end
+    end
+
+    -- Write defaults to disk on first run so the user can edit the file
+    if firstRun then
+        config.save(CONFIG_PATH, cfg)
     end
 
     -- Initialize each module
