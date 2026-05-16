@@ -464,14 +464,16 @@ function M.drawUI(gpu, x, y, w, h)
     for i = 1, math.min(#hist, listRows) do
         local e = hist[i]
         local r = LIST_START + i - 1
+        local rightW = 15  -- "%5dx %-7s" = 5+1+1+7+1 margin
+        local labelW = colCW - 10 - rightW - 1
         gpu.setForeground(C_DIM)
         gpu.set(colCX, r, e.when)
         gpu.setForeground(C_VALUE)
-        local lbl = unicode.sub(e.label, 1, colCW - 18)
+        local lbl = unicode.sub(e.label, 1, labelW)
         gpu.set(colCX + 9, r, lbl)
-        gpu.setForeground(e.status == "queued" and C_POS or C_NEG)
-        local right = string.format("%5dx %-4s", e.amount, e.status:sub(1,4))
-        gpu.set(colCX + colCW - #right, r, right)
+        gpu.setForeground(e.status == "done" and C_POS or (e.status == "queued" and C_LABEL or C_NEG))
+        local right = string.format("%5dx %-7s", e.amount, e.status:sub(1,7))
+        gpu.set(colCX + colCW - rightW - 1, r, right)
         gpu.setBackground(0x000000)
     end
 
