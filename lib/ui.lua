@@ -7,7 +7,7 @@ local ui = {}
 
 function ui.clearRegion(gpu, x, y, w, h)
     gpu.setBackground(0x000000)
-    gpu.setForeground(0xFFFFFF)
+    gpu.setForeground(0x00FFFF)
     gpu.fill(x, y, w, h, " ")
 end
 
@@ -108,11 +108,11 @@ function ui.drawTabBar(gpu, screenW, modules, activeIdx)
         local label = " " .. mod.name .. " "
         local len = unicode.len(label)
         if i == activeIdx then
-            gpu.setBackground(0x00AAAA)
+            gpu.setBackground(0x00FFFF)
             gpu.setForeground(0x000000)
         else
-            gpu.setBackground(0x002222)
-            gpu.setForeground(0x008888)
+            gpu.setBackground(0x003333)
+            gpu.setForeground(0x00FFFF)
         end
         if x + len - 1 <= screenW then
             gpu.set(x, 1, label)
@@ -127,7 +127,7 @@ function ui.drawTabBar(gpu, screenW, modules, activeIdx)
     end
 
     gpu.setBackground(0x000000)
-    gpu.setForeground(0xFFFFFF)
+    gpu.setForeground(0x00FFFF)
 end
 
 return ui
