@@ -122,21 +122,19 @@ local function main()
 
     -- Event loop
     while true do
-        local ev, _, _, code = event.pull(REDRAW_INTERVAL,
-                                          "key_down", "interrupted")
+        local ev, _, char, code = event.pull(REDRAW_INTERVAL,
+                                             "key_down", "interrupted")
 
         if ev == "interrupted" then
             break
         elseif ev == "key_down" then
-            if code == keyboard.keys.q then
+            if char == string.byte("q") or char == string.byte("Q") then
                 break
             elseif code == keyboard.keys.tab then
                 -- Cycle to next module
                 activeIdx = (activeIdx % #MODULES) + 1
                 redraw()
             else
-                -- Delegate to active module
-                local char = unicode.char(code)
                 MODULES[activeIdx].handleKey(char, code)
                 redraw()
             end
