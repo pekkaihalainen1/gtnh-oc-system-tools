@@ -266,63 +266,31 @@ if fail_count == 0 then
         io.write("GPU address saved to config.cfg\n\n")
     end
 
-    -- ── Register OpenOS rc service for autorun on boot ────────────────────────
-    io.write("Configuring autorun via OpenOS rc system...\n")
+    -- ── Autorun via /home/.shrc ───────────────────────────────────────────────
+    io.write("Configuring autorun via /home/.shrc...\n")
 
-    -- Write the rc.d service script with the install path baked in
-    local rcDir     = "/etc/rc.d/"
-    local rcScript  = rcDir .. "gtnh_tools.lua"
     local mainPath  = installRoot .. "main.lua"
+    local shrcPath  = "/home/.shrc"
+    local marker    = "gtnh_tools_autorun"
+    local shrcLine  = 'lua "' .. mainPath .. '"  -- ' .. marker .. '\n'
 
-    if not filesystem.isDirectory(rcDir) then
-        filesystem.makeDirectory(rcDir)
-    end
+    -- Read existing .shrc (if any), strip old autorun line, append new one
+    local existing = ""
+    local rf = io.open(shrcPath, "r")
+    if rf then existing = rf:read("*a") ; rf:close() end
 
-    local svc = io.open(rcScript, "w")
-    if svc then
-        svc:write(string.format([[
-local M = {}
-function M.start()
-    local thread = require("thread")
-    local t = thread.create(function()
-        local shell = require("shell")
-        shell.execute(%q)
-    end)
-    thread.detach(t)
-end
-function M.stop() end
-return M
-]], mainPath))
-        svc:close()
-        io.write("  Written " .. rcScript .. "\n")
+    -- Remove any previous autorun line for this tool
+    existing = existing:gsub('[^\n]*' .. marker .. '[^\n]*\n?', '')
+
+    local wf = io.open(shrcPath, "w")
+    if wf then
+        wf:write(existing)
+        wf:write(shrcLine)
+        wf:close()
+        io.write("  Written autorun line to " .. shrcPath .. "\n\n")
     else
-        io.write("  WARNING: could not write " .. rcScript .. "\n")
+        io.write("  WARNING: could not write to " .. shrcPath .. "\n\n")
     end
-
-    -- Enable the service in /etc/rc.cfg
-    -- OpenOS loads this file with loadfile(), so it must be "return {...}"
-    local rcCfgPath = "/etc/rc.cfg"
-    local rcCfg = {}
-    local rcf = io.open(rcCfgPath, "r")
-    if rcf then
-        local chunk = load(rcf:read("*a"))
-        rcf:close()
-        if chunk then
-            local ok, data = pcall(chunk)
-            if ok and type(data) == "table" then rcCfg = data end
-        end
-    end
-    rcCfg.gtnh_tools = true
-    local rcw = io.open(rcCfgPath, "w")
-    if rcw then
-        rcw:write("return {\n")
-        for k, v in pairs(rcCfg) do
-            rcw:write(string.format("  %s = %s,\n", tostring(k), tostring(v)))
-        end
-        rcw:write("}\n")
-        rcw:close()
-    end
-    io.write("  Enabled gtnh_tools in " .. rcCfgPath .. "\n\n")
 
     io.write("Run  lua " .. installRoot .. "main.lua  to start.\n")
 else
