@@ -1,7 +1,7 @@
 -- Power control module for Lapotronic Supercapacitor
 -- Redstone ON when energy > highThreshold, OFF when energy < lowThreshold
 local component = require("component")
-local thread    = require("thread")
+local computer  = require("computer")
 local os        = require("os")
 local ui        = require("lib/ui")
 
@@ -28,7 +28,7 @@ local state = {
 local _gpu        = nil
 local _redstoneIO = nil
 local _detector   = nil
-local _thread     = nil
+local _lastCheck  = 0
 
 -- ── Component helpers ────────────────────────────────────────────────────────
 
@@ -90,41 +90,34 @@ function M.init(gpu, screenW, screenH)
     return true
 end
 
-function M.start()
-    local cfg = M.config  -- capture reference
+function M.start() end  -- no background thread; update() drives logic
 
-    _thread = thread.create(function()
-        while true do
-            local ok, result = pcall(function()
-                local pct = readEnergy(_detector)
-                state.energyPercent = pct
-                state.lastUpdate    = os.date("%H:%M:%S")
-                state.error         = nil
+-- Called every main loop tick; respects checkInterval via uptime tracking
+function M.update()
+    local now = computer.uptime()
+    if now - _lastCheck < M.config.checkInterval then return end
+    _lastCheck = now
 
-                -- Hysteresis: ON above highThreshold, OFF below lowThreshold
-                if not state.redstoneActive and pct >= cfg.highThreshold then
-                    setRedstone(true)
-                elseif state.redstoneActive and pct <= cfg.lowThreshold then
-                    setRedstone(false)
-                end
-            end)
+    local ok, result = pcall(function()
+        local pct = readEnergy(_detector)
+        state.energyPercent = pct
+        state.lastUpdate    = os.date("%H:%M:%S")
+        state.error         = nil
 
-            if not ok then
-                state.error = tostring(result)
-            end
-
-            os.sleep(cfg.checkInterval)
+        -- Hysteresis: ON above highThreshold, OFF below lowThreshold
+        if not state.redstoneActive and pct >= M.config.highThreshold then
+            setRedstone(true)
+        elseif state.redstoneActive and pct <= M.config.lowThreshold then
+            setRedstone(false)
         end
     end)
 
-    return _thread
+    if not ok then
+        state.error = tostring(result)
+    end
 end
 
 function M.stop()
-    if _thread then
-        _thread:kill()
-        _thread = nil
-    end
     pcall(setRedstone, false)
 end
 

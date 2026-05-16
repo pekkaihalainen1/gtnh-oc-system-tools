@@ -1,6 +1,6 @@
 -- GTNH OC System Tools — main shell
 -- Manages modules, tab UI, and event loop.
--- Each module runs its control logic in a background thread.
+-- Modules expose update() which is called each loop tick.
 
 local component = require("component")
 local event     = require("event")
@@ -23,7 +23,6 @@ local gpu         = nil
 local screenW     = 0
 local screenH     = 0
 local activeIdx   = 1
-local threads     = {}
 local cfg         = {}
 
 -- ── Helpers ──────────────────────────────────────────────────────────────────
@@ -111,10 +110,9 @@ local function main()
         end
     end
 
-    -- Start background threads
+    -- Notify modules that the loop is starting (no-op for most)
     for _, mod in ipairs(MODULES) do
-        local t = mod.start()
-        table.insert(threads, t)
+        if mod.start then mod.start() end
     end
 
     -- Initial draw
@@ -125,23 +123,24 @@ local function main()
         local ev, _, char, code = event.pull(REDRAW_INTERVAL,
                                              "key_down", "interrupted")
 
+        -- Run pending module logic (respects each module's own interval)
+        for _, mod in ipairs(MODULES) do
+            if mod.update then mod.update() end
+        end
+
         if ev == "interrupted" then
             break
         elseif ev == "key_down" then
             if char == string.byte("q") or char == string.byte("Q") then
                 break
             elseif code == keyboard.keys.tab then
-                -- Cycle to next module
                 activeIdx = (activeIdx % #MODULES) + 1
-                redraw()
             else
                 MODULES[activeIdx].handleKey(char, code)
-                redraw()
             end
-        else
-            -- Timeout — just redraw to refresh live data
-            redraw()
         end
+
+        redraw()
     end
 
     shutdown()
