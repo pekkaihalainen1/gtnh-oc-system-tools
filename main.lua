@@ -128,7 +128,9 @@ local function main()
         if ev == "interrupted" then
             break
         elseif ev == "key_down" then
-            if code == keyboard.keys.tab then
+            if code == keyboard.keys.q then
+                break
+            elseif code == keyboard.keys.tab then
                 -- Cycle to next module
                 activeIdx = (activeIdx % #MODULES) + 1
                 redraw()

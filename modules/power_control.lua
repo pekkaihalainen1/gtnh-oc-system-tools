@@ -189,7 +189,7 @@ function M.drawUI(gpu, x, y, w, h)
     -- Config info
     gpu.setForeground(0x666666)
     gpu.set(x + 2, barY + barH + 5, string.format(
-        "Control: ON >%.0f%%  OFF <%.0f%%   Interval: %ds   Side: %d",
+        "Control: ON >%.0f%%  OFF <%.0f%%   Interval: %ds   Side: %d   [Q] Quit  [Tab] Switch",
         cfg.highThreshold * 100, cfg.lowThreshold * 100,
         cfg.checkInterval, cfg.redstoneSide
     ))
