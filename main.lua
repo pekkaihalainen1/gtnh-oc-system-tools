@@ -29,14 +29,7 @@ local cfg         = {}
 -- ── Helpers ──────────────────────────────────────────────────────────────────
 
 local function fatal(msg)
-    if gpu then
-        gpu.setBackground(0x000000)
-        gpu.setForeground(0xFF4444)
-        gpu.set(1, 1, "FATAL: " .. tostring(msg))
-    else
-        io.write("FATAL: " .. tostring(msg) .. "\n")
-    end
-    os.exit(1)
+    error(tostring(msg), 0)
 end
 
 local function initGPU()

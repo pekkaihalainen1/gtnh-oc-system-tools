@@ -115,6 +115,18 @@ end
 io.write("=== GTNH OC System Tools Setup ===\n")
 io.write("Install root: " .. installRoot .. "\n\n")
 
+-- Remove any existing managed files so stale code doesn't linger.
+-- Config files are intentionally skipped.
+io.write("Cleaning existing files...\n")
+for _, relPath in ipairs(FILES) do
+    local destPath = installRoot .. relPath
+    if filesystem.exists(destPath) then
+        filesystem.remove(destPath)
+        io.write("  Removed " .. relPath .. "\n")
+    end
+end
+io.write("\n")
+
 local ok_count = 0
 local fail_count = 0
 
