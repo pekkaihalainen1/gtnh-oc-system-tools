@@ -29,13 +29,8 @@ local C_ACT   = 0x002244
 -- ── Constants ─────────────────────────────────────────────────────────────────
 
 local HISTORY_MAX  = 30
-local VISIBLE_ROWS = 32   -- rows 6..37 on a 50-row screen
-local COL_B_X      = 54   -- patterns panel start x
-local COL_C_X      = 108  -- history panel start x
-local COL_A_W      = 52   -- stocked panel width
-local COL_B_W      = 53   -- patterns panel width
-local COL_C_W      = 53   -- history panel width
-local EDITOR_ROW   = 9    -- row offset from y for editor section (relative)
+local VISIBLE_ROWS = 32
+local CRAFT_TIMEOUT = 300  -- seconds before assuming a stuck job is dead
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 
@@ -66,7 +61,9 @@ local state = {
     error        = nil,
 }
 
-local _patsByKey = {}  -- itemKey -> craftable object cache
+local _patsByKey    = {}  -- itemKey -> craftable object cache
+local _pendingJobs  = {}  -- itemKey -> {job, requestedAt, amount}
+                          -- cleared when job finishes, cancels, or times out
 
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -179,6 +176,18 @@ local function refreshPatterns()
     rebuildFilteredPatterns()
 end
 
+local function jobFinished(pending, current, level)
+    if current >= level then return true end
+    if computer.uptime() - pending.requestedAt > CRAFT_TIMEOUT then return true end
+    if pending.job then
+        local ok, done = pcall(function() return pending.job.isDone() end)
+        if ok and done then return true end
+        local ok2, cancelled = pcall(function() return pending.job.isCanceled() end)
+        if ok2 and cancelled then return true end
+    end
+    return false
+end
+
 local function checkAndStock()
     local inStock = {}
     local items = state.me.getItemsInNetwork() or {}
@@ -187,9 +196,19 @@ local function checkAndStock()
             inStock[itemKey(item.name, item.damage)] = item.size or 0
         end
     end
+
     for key, entry in pairs(M.config.stockList) do
         if entry.level and entry.level > 0 then
             local current = inStock[key] or 0
+
+            -- Clear finished jobs so we can request again
+            if _pendingJobs[key] and jobFinished(_pendingJobs[key], current, entry.level) then
+                _pendingJobs[key] = nil
+            end
+
+            -- Skip if a job is still running
+            if _pendingJobs[key] then goto continue end
+
             if current < entry.level then
                 local deficit = entry.level - current
                 local amount  = (entry.perCycle and entry.perCycle > 0)
@@ -199,20 +218,30 @@ local function checkAndStock()
                 if not craftable then
                     addHistory(entry.label or key, amount, "no pattern")
                 else
-                    -- dot notation: OC proxy methods must NOT be called with colon
-                    local ok, err = pcall(function()
-                        craftable.request(amount, true, nil)
+                    local ok, job = pcall(function()
+                        return craftable.request(amount, true, nil)
                     end)
                     if not ok then
-                        -- fallback: some versions use me_interface.requestCrafting
-                        local ok2, _ = pcall(function()
-                            state.me.requestCrafting({name=entry.name, damage=entry.damage}, amount)
+                        local ok2, job2 = pcall(function()
+                            return state.me.requestCrafting(
+                                {name=entry.name, damage=entry.damage}, amount)
                         end)
-                        ok = ok2
+                        ok, job = ok2, job2
                     end
-                    addHistory(entry.label or key, amount, ok and "queued" or "err")
+                    if ok then
+                        _pendingJobs[key] = {
+                            job         = job,
+                            requestedAt = computer.uptime(),
+                            amount      = amount,
+                        }
+                        addHistory(entry.label or key, amount, "queued")
+                    else
+                        addHistory(entry.label or key, amount, "err")
+                    end
                 end
             end
+
+            ::continue::
         end
     end
 end
