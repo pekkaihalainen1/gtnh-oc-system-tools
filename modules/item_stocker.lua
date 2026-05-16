@@ -30,7 +30,7 @@ local C_ACT   = 0x002244
 
 local HISTORY_MAX  = 30
 local VISIBLE_ROWS = 32
-local CRAFT_TIMEOUT = 300  -- seconds before assuming a stuck job is dead
+local CRAFT_TIMEOUT = 900  -- seconds before assuming a stuck job is dead
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 
