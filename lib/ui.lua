@@ -3,18 +3,76 @@ local unicode = require("unicode")
 
 local ui = {}
 
--- Fill a screen region with black background / white foreground
+-- ── Basic helpers ─────────────────────────────────────────────────────────────
+
 function ui.clearRegion(gpu, x, y, w, h)
     gpu.setBackground(0x000000)
     gpu.setForeground(0xFFFFFF)
     gpu.fill(x, y, w, h, " ")
 end
 
--- Draw a bordered progress bar. Interior fills from left by percent (0.0–1.0).
+-- Write text centered horizontally at a given row within [x, x+w)
+function ui.setCentered(gpu, x, y, w, text)
+    local len = unicode.len(text)
+    local tx = x + math.floor((w - len) / 2)
+    gpu.set(tx, y, text)
+end
+
+-- ── Color helpers ─────────────────────────────────────────────────────────────
+
+function ui.getEnergyColor(percent, low, high)
+    if percent <= low then
+        return 0xFF2222  -- red: critical
+    elseif percent <= 0.5 then
+        return 0xFFAA00  -- amber: low
+    elseif percent <= high then
+        return 0x00DD44  -- green: good
+    else
+        return 0x00FFFF  -- cyan: full
+    end
+end
+
+-- ── Formatting helpers ────────────────────────────────────────────────────────
+
+-- Compact EU value: "123 EU", "12.3 KEU", "123.4 MEU", "1.23 GEU"
+function ui.formatEU(n)
+    n = math.floor(n or 0)
+    if n >= 1e9 then
+        return string.format("%.2f GEU", n / 1e9)
+    elseif n >= 1e6 then
+        return string.format("%.1f MEU", n / 1e6)
+    elseif n >= 1e3 then
+        return string.format("%.1f KEU", n / 1e3)
+    else
+        return string.format("%d EU", n)
+    end
+end
+
+-- Human-readable duration from seconds: "~2h 14m", "~45m 3s", "< 1s"
+-- Returns "---" for nil, negative, or very large values.
+function ui.formatTime(seconds)
+    if not seconds or seconds < 0 or seconds ~= seconds then return "---" end
+    if seconds > 99 * 3600 then return "> 99h" end
+    if seconds < 1 then return "< 1s" end
+    seconds = math.floor(seconds)
+    local h = math.floor(seconds / 3600)
+    local m = math.floor((seconds % 3600) / 60)
+    local s = seconds % 60
+    if h > 0 then
+        return string.format("~%dh %dm", h, m)
+    elseif m > 0 then
+        return string.format("~%dm %ds", m, s)
+    else
+        return string.format("~%ds", s)
+    end
+end
+
+-- ── Bar helpers ───────────────────────────────────────────────────────────────
+
+-- Horizontal progress bar (legacy, kept for potential reuse)
 function ui.drawProgressBar(gpu, x, y, w, h, percent, fillColor)
-    -- Border
     gpu.setBackground(0x000000)
-    gpu.setForeground(0xFFFFFF)
+    gpu.setForeground(0x00CCCC)
     gpu.fill(x, y, w, 1, "═")
     gpu.fill(x, y + h - 1, w, 1, "═")
     gpu.fill(x, y, 1, h, "║")
@@ -28,35 +86,36 @@ function ui.drawProgressBar(gpu, x, y, w, h, percent, fillColor)
     local innerH = h - 2
     if innerW <= 0 or innerH <= 0 then return end
 
-    -- Clear interior
-    gpu.setBackground(0x000000)
+    gpu.setBackground(0x0D0D1A)
     gpu.fill(x + 1, y + 1, innerW, innerH, " ")
 
-    -- Fill progress
     local filled = math.floor(innerW * math.max(0, math.min(1, percent)))
     if filled > 0 then
         gpu.setBackground(fillColor)
         gpu.fill(x + 1, y + 1, filled, innerH, " ")
     end
-
     gpu.setBackground(0x000000)
 end
 
--- Return a color representing the energy level relative to thresholds
-function ui.getEnergyColor(percent, low, high)
-    if percent <= low then
-        return 0xFF0000  -- red: critical
-    elseif percent <= 0.5 then
-        return 0xFFFF00  -- yellow: low
-    elseif percent <= high then
-        return 0x00FF00  -- green: good
-    else
-        return 0x00FFFF  -- cyan: full
+-- Vertical bar filling from bottom up, no border (border is part of outer box).
+-- The region [x, x+w) × [y, y+h) is completely redrawn.
+function ui.drawVerticalBar(gpu, x, y, w, h, percent, fillColor)
+    local filled = math.floor(h * math.max(0, math.min(1, percent)))
+    local empty  = h - filled
+
+    if empty > 0 then
+        gpu.setBackground(0x0D0D1A)
+        gpu.fill(x, y, w, empty, " ")
     end
+    if filled > 0 then
+        gpu.setBackground(fillColor)
+        gpu.fill(x, y + empty, w, filled, " ")
+    end
+    gpu.setBackground(0x000000)
 end
 
--- Draw a tab bar at row 1 across the full screen width.
--- modules: list of {name=...} tables; activeIdx: 1-based index of selected tab.
+-- ── Tab bar ───────────────────────────────────────────────────────────────────
+
 function ui.drawTabBar(gpu, screenW, modules, activeIdx)
     gpu.setBackground(0x000000)
     gpu.fill(1, 1, screenW, 1, " ")
@@ -69,31 +128,23 @@ function ui.drawTabBar(gpu, screenW, modules, activeIdx)
             gpu.setBackground(0x00AAAA)
             gpu.setForeground(0x000000)
         else
-            gpu.setBackground(0x333333)
-            gpu.setForeground(0xAAAAAA)
+            gpu.setBackground(0x222233)
+            gpu.setForeground(0x8888AA)
         end
         if x + len - 1 <= screenW then
             gpu.set(x, 1, label)
         end
-        x = x + len + 1  -- 1-char gap between tabs
+        x = x + len + 1
     end
 
-    -- Fill remaining tab bar with separator line
     if x <= screenW then
         gpu.setBackground(0x000000)
-        gpu.setForeground(0x333333)
+        gpu.setForeground(0x333355)
         gpu.fill(x, 1, screenW - x + 1, 1, "─")
     end
 
     gpu.setBackground(0x000000)
     gpu.setForeground(0xFFFFFF)
-end
-
--- Write text centered horizontally at a given row within [x, x+w)
-function ui.setCentered(gpu, x, y, w, text)
-    local len = unicode.len(text)
-    local tx = x + math.floor((w - len) / 2)
-    gpu.set(tx, y, text)
 end
 
 return ui
