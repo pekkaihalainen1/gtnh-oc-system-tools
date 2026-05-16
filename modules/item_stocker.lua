@@ -247,22 +247,34 @@ end
 -- ── Module API ────────────────────────────────────────────────────────────────
 
 function M.init(gpu, screenW, screenH)
+    state.screenW = screenW
+    state.screenH = screenH
     if component.isAvailable("me_interface") then
         state.me = component.me_interface
     elseif component.isAvailable("me_controller") then
         state.me = component.me_controller
     else
-        return false, "No ME Interface or ME Controller found"
+        state.error = "No ME Interface found — connect one and restart"
     end
-    state.screenW = screenW
-    state.screenH = screenH
     rebuildStockedList()
-    return true
+    return true  -- never fatal: power module must keep running
 end
 
 function M.start() end
 
 function M.update()
+    if not state.me then
+        -- retry component discovery each cycle in case ME is connected later
+        if component.isAvailable("me_interface") then
+            state.me = component.me_interface
+            state.error = nil
+        elseif component.isAvailable("me_controller") then
+            state.me = component.me_controller
+            state.error = nil
+        end
+        return
+    end
+
     local now = computer.uptime()
     if now - state.lastCheck < M.config.checkInterval then return end
     state.lastCheck = now
