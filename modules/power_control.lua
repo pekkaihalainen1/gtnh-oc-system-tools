@@ -20,27 +20,28 @@ local state = {
     energyPercent  = 0,
     euStored       = 0,
     euCapacity     = 0,
-    euInput        = 0,   -- EU/t average input
-    euOutput       = 0,   -- EU/t average output
+    euNet          = 0,   -- EU/t net (positive = charging, negative = draining)
     redstoneActive = false,
     lastUpdate     = "--:--:--",
     error          = nil,
 }
 
-local _redstoneIO = nil
-local _detector   = nil
-local _lastCheck  = 0
+local _redstoneIO  = nil
+local _detector    = nil
+local _lastCheck   = 0
+local _prevStored  = nil   -- for delta-based net flow
+local _prevTime    = nil
 
--- ── Colors ───────────────────────────────────────────────────────────────────
+-- ── Colors ────────────────────────────────────────────────────────────────────
 
-local C_BORDER   = 0x00CCCC
-local C_TITLE    = 0xFF00FF
-local C_LABEL    = 0xFF00FF
-local C_VALUE    = 0xFFFFFF
-local C_DIM      = 0x555577
-local C_PANEL    = 0x0D0D1A
-local C_POS      = 0x00FF88
-local C_NEG      = 0xFF4444
+local C_TITLE  = 0xFF00FF
+local C_LABEL  = 0x00CCCC
+local C_VALUE  = 0xFFFFFF
+local C_DIM    = 0x555577
+local C_PANEL  = 0x111122
+local C_POS    = 0x00FF88
+local C_NEG    = 0xFF4444
+local C_SEP    = 0x008888
 
 -- ── Component helpers ─────────────────────────────────────────────────────────
 
@@ -102,25 +103,23 @@ function M.update()
             error("Unknown energy detector API")
         end
 
-        state.euStored    = stored or 0
-        state.euCapacity  = cap    or 0
+        state.euStored   = stored or 0
+        state.euCapacity = cap    or 0
         state.energyPercent = (cap and cap > 0) and (stored / cap) or 0
-        state.lastUpdate  = os.date("%H:%M:%S")
-        state.error       = nil
+        state.lastUpdate = os.date("%H:%M:%S")
+        state.error      = nil
 
-        -- Flow rates (best-effort; silently 0 if not supported)
-        local inp = 0
-        if det.getAverageElectricInput then
-            pcall(function() inp = det.getAverageElectricInput() or 0 end)
+        -- Net flow: delta EU between checks, converted to EU/t (20t/s)
+        if _prevStored ~= nil and _prevTime ~= nil then
+            local dt = now - _prevTime
+            if dt > 0 then
+                state.euNet = ((stored - _prevStored) / dt) / 20
+            end
         end
-        local out = 0
-        if det.getAverageElectricOutput then
-            pcall(function() out = det.getAverageElectricOutput() or 0 end)
-        end
-        state.euInput  = inp
-        state.euOutput = out
+        _prevStored = stored
+        _prevTime   = now
 
-        -- Hysteresis: ON above highThreshold, OFF below lowThreshold
+        -- Hysteresis control
         local pct = state.energyPercent
         if not state.redstoneActive and pct >= M.config.highThreshold then
             setRedstone(true)
@@ -143,8 +142,7 @@ function M.getStatus()
         energyPercent  = state.energyPercent,
         euStored       = state.euStored,
         euCapacity     = state.euCapacity,
-        euInput        = state.euInput,
-        euOutput       = state.euOutput,
+        euNet          = state.euNet,
         redstoneActive = state.redstoneActive,
         lastUpdate     = state.lastUpdate,
         error          = state.error,
@@ -154,159 +152,127 @@ end
 -- ── drawUI ────────────────────────────────────────────────────────────────────
 
 function M.drawUI(gpu, x, y, w, h)
-    local cfg   = M.config
-    local pct   = state.energyPercent
-    local color = ui.getEnergyColor(pct, cfg.lowThreshold, cfg.highThreshold)
+    local cfg    = M.config
+    local pct    = state.energyPercent
+    local color  = ui.getEnergyColor(pct, cfg.lowThreshold, cfg.highThreshold)
 
-    -- Derived flow values
-    local net       = state.euInput - state.euOutput     -- EU/t
-    local netPerSec = net * 20                            -- EU/s
-    local timeToFull, timeToEmpty
-    if netPerSec > 0 then
-        timeToFull  = (state.euCapacity - state.euStored) / netPerSec
-    elseif netPerSec < 0 then
-        timeToEmpty = state.euStored / (-netPerSec)
-    end
+    -- Time estimates from net flow
+    local netPerSec   = state.euNet * 20
+    local timeToFull  = (netPerSec >  1) and (state.euCapacity - state.euStored) / netPerSec  or nil
+    local timeToEmpty = (netPerSec < -1) and  state.euStored                     / (-netPerSec) or nil
 
-    -- Layout constants
-    local BAR_W   = 12   -- left column width including outer border
-    local barInX  = x + 1          -- inner bar x start
-    local barInW  = BAR_W - 2      -- inner bar width (no borders)
-    local hdrH    = 2               -- header rows (title + separator)
-    local ftrH    = 2               -- footer rows (separator + hint)
-    local barInY  = y + hdrH + 1   -- bar starts after header + top border
-    local barInH  = h - hdrH - ftrH - 2  -- bar height (minus borders and footer)
-    local rColX   = x + BAR_W + 1  -- right column content start
-    local rColW   = w - BAR_W - 2  -- right column content width
-
-    -- ── Clear entire region ──────────────────────────────────────────────────
+    -- Clear
     gpu.setBackground(0x000000)
     gpu.fill(x, y, w, h, " ")
 
-    -- ── Outer border (full box) ──────────────────────────────────────────────
-    gpu.setForeground(C_BORDER)
-    gpu.setBackground(0x000000)
-    -- Top edge
-    gpu.fill(x,         y,     w, 1, "═")
-    gpu.set (x,         y,         "╔")
-    gpu.set (x + w - 1, y,         "╗")
-    -- Bottom edge
-    gpu.fill(x,         y + h - 1, w, 1, "═")
-    gpu.set (x,         y + h - 1, "╚")
-    gpu.set (x + w - 1, y + h - 1, "╝")
-    -- Left edge
-    gpu.fill(x,         y + 1, 1, h - 2, "║")
-    -- Right edge
-    gpu.fill(x + w - 1, y + 1, 1, h - 2, "║")
+    local cx = x + 2   -- content left margin
+    local row = y      -- current row cursor
 
-    -- ── Title row ────────────────────────────────────────────────────────────
+    -- ── Title ────────────────────────────────────────────────────────────────
+    row = row + 1
     gpu.setForeground(C_TITLE)
-    gpu.set(x + 2, y + 1, "LAPOTRONIC SUPERCAPACITOR")
+    gpu.set(cx, row, "LAPOTRONIC SUPERCAPACITOR")
     gpu.setForeground(C_DIM)
-    local ts = state.lastUpdate
-    gpu.set(x + w - 1 - #ts, y + 1, ts)
-
-    -- ── Header separator: ╠══...══╦══...══╣ ────────────────────────────────
-    local sepY = y + hdrH
-    gpu.setForeground(C_BORDER)
-    gpu.fill(x,             sepY, w, 1, "═")
-    gpu.set (x,             sepY, "╠")
-    gpu.set (x + w - 1,    sepY, "╣")
-    gpu.set (x + BAR_W,    sepY, "╦")
-
-    -- ── Vertical divider (left column right wall) ────────────────────────────
-    gpu.fill(x + BAR_W, y + hdrH + 1, 1, h - hdrH - ftrH - 2, "║")
-
-    -- ── Vertical energy bar ──────────────────────────────────────────────────
-    if barInH > 0 then
-        ui.drawVerticalBar(gpu, barInX, barInY, barInW, barInH, pct, color)
+    gpu.set(x + w - 1 - #state.lastUpdate, row, state.lastUpdate)
+    -- thin separator after title
+    gpu.setForeground(C_SEP)
+    local sepStart = cx + 26
+    local sepEnd   = x + w - 2 - #state.lastUpdate - 1
+    if sepEnd > sepStart then
+        gpu.fill(sepStart, row, sepEnd - sepStart, 1, "─")
     end
 
-    -- Percentage label below bar
-    local pctStr = string.format("%.1f%%", pct * 100)
-    gpu.setForeground(C_VALUE)
-    gpu.setBackground(0x000000)
-    ui.setCentered(gpu, barInX, y + h - ftrH - 1, barInW, pctStr)
+    -- ── Energy bar (5 rows thick, 10-char margin each side) ──────────────────
+    local MARGIN  = 10
+    row = row + 2
+    local barX    = x + MARGIN
+    local barW    = w - MARGIN * 2
+    local barH    = 5
+    local filled  = math.floor(barW * math.max(0, math.min(1, pct)))
+    local midRow  = row + math.floor(barH / 2)
 
-    -- ── Right column content rows ─────────────────────────────────────────────
-    local function rRow(row, label, value, valColor)
+    for r = row, row + barH - 1 do
+        if filled > 0 then
+            gpu.setBackground(color)
+            gpu.fill(barX, r, filled, 1, " ")
+        end
+        if filled < barW then
+            gpu.setBackground(C_PANEL)
+            gpu.fill(barX + filled, r, barW - filled, 1, " ")
+        end
+    end
+    -- Percentage centered in middle row of bar
+    gpu.setBackground(color)
+    gpu.setForeground(0x000000)
+    local pctStr = string.format("%.1f%%", pct * 100)
+    local pctX   = barX + math.floor((barW - #pctStr) / 2)
+    gpu.set(pctX, midRow, pctStr)
+    gpu.setBackground(0x000000)
+
+    -- Threshold tick marks below bar
+    row = row + barH
+    gpu.setForeground(C_NEG)
+    local lowX = barX + math.floor(barW * cfg.lowThreshold)
+    gpu.set(lowX, row, string.format("%.0f%%", cfg.lowThreshold * 100))
+    gpu.setForeground(C_POS)
+    local highX = barX + math.floor(barW * cfg.highThreshold) - 3
+    gpu.set(highX, row, string.format("%.0f%%", cfg.highThreshold * 100))
+
+    -- ── Data rows ─────────────────────────────────────────────────────────────
+    row = row + 2
+
+    local function label(r, lbl, val, vc)
         gpu.setForeground(C_LABEL)
         gpu.setBackground(0x000000)
-        gpu.set(rColX, row, label)
-        gpu.setForeground(valColor or C_VALUE)
-        gpu.set(rColX + 10, row, value)
+        gpu.set(cx, r, lbl)
+        gpu.setForeground(vc or C_VALUE)
+        gpu.set(cx + 11, r, val)
     end
 
-    local r = y + hdrH + 1   -- current right-column row
+    label(row, "STORED    ",
+        ui.formatEU(state.euStored) .. "  /  " .. ui.formatEU(state.euCapacity))
+    row = row + 2
 
-    -- STORED
-    rRow(r, "STORED  ", ui.formatEU(state.euStored))
-    r = r + 1
-    gpu.setForeground(C_DIM)
-    gpu.set(rColX + 10, r,
-        "/ " .. ui.formatEU(state.euCapacity) ..
-        "  (" .. string.format("%.1f%%", pct * 100) .. ")")
-    r = r + 2
+    local netColor = state.euNet >= 0 and C_POS or C_NEG
+    label(row, "NET FLOW  ", string.format("%+.0f EU/t", state.euNet), netColor)
+    row = row + 1
 
-    -- FLOW
-    local function fmtFlow(euPerTick)
-        return string.format("%+.0f EU/t", euPerTick)
-    end
-    rRow(r, "INPUT   ", fmtFlow(state.euInput),  C_POS) ; r = r + 1
-    rRow(r, "OUTPUT  ", fmtFlow(-state.euOutput), C_NEG) ; r = r + 1
-    local netColor = net >= 0 and C_POS or C_NEG
-    rRow(r, "NET     ", fmtFlow(net), netColor) ; r = r + 2
-
-    -- TIME ESTIMATES
-    rRow(r, "FULL IN ", ui.formatTime(timeToFull),  C_VALUE) ; r = r + 1
-    rRow(r, "EMPTY IN", ui.formatTime(timeToEmpty), C_VALUE) ; r = r + 1
-
-    -- ── Redstone divider ─────────────────────────────────────────────────────
-    local rsDivY = r
-    gpu.setForeground(C_BORDER)
-    gpu.fill(x + BAR_W,    rsDivY, w - BAR_W - 1, 1, "═")
-    gpu.set (x + BAR_W,    rsDivY, "╠")
-    gpu.set (x + w - 1,    rsDivY, "╣")
-    r = r + 1
-
-    -- REDSTONE STATUS
+    local col2 = cx + 30
+    label(row, "FULL IN   ", ui.formatTime(timeToFull))
     gpu.setForeground(C_LABEL)
-    gpu.set(rColX, r, "REDSTONE SIGNAL")
-    local badgeBg   = state.redstoneActive and 0xAA0000 or 0x222222
-    local badgeTxt  = state.redstoneActive and " ACTIVE " or "INACTIVE"
+    gpu.set(col2, row, "EMPTY IN  ")
+    gpu.setForeground(C_VALUE)
+    gpu.set(col2 + 10, row, ui.formatTime(timeToEmpty))
+
+    -- ── Separator ─────────────────────────────────────────────────────────────
+    row = row + 2
+    gpu.setForeground(C_SEP)
+    gpu.fill(cx, row, w - 4, 1, "─")
+
+    -- ── Redstone section ──────────────────────────────────────────────────────
+    row = row + 1
+    gpu.setForeground(C_LABEL)
+    gpu.set(cx, row, "REDSTONE  ")
+    local badgeBg  = state.redstoneActive and 0xAA0000 or 0x222233
+    local badgeTxt = state.redstoneActive and " ACTIVE " or "INACTIVE"
     gpu.setForeground(C_VALUE)
     gpu.setBackground(badgeBg)
-    gpu.set(rColX + 17, r, " " .. badgeTxt .. " ")
+    gpu.set(cx + 10, row, " " .. badgeTxt .. " ")
     gpu.setBackground(0x000000)
-    r = r + 1
-
     gpu.setForeground(C_DIM)
-    gpu.set(rColX, r,
-        string.format("ON >%.0f%%  ·  OFF <%.0f%%  ·  Side: %d",
-            cfg.highThreshold * 100, cfg.lowThreshold * 100, cfg.redstoneSide))
-    r = r + 1
+    gpu.set(cx + 22, row, string.format(
+        "ON >%.0f%%  ·  OFF <%.0f%%  ·  Side: %d",
+        cfg.highThreshold * 100, cfg.lowThreshold * 100, cfg.redstoneSide))
 
-    -- ── Footer divider ────────────────────────────────────────────────────────
-    local ftrDivY = y + h - ftrH - 1
-    if r <= ftrDivY then
-        gpu.setForeground(C_BORDER)
-        gpu.fill(x + BAR_W,  ftrDivY, w - BAR_W - 1, 1, "═")
-        gpu.set (x + BAR_W,  ftrDivY, "╠")
-        gpu.set (x + w - 1,  ftrDivY, "╣")
-        -- bottom-left corner of vertical divider
-        gpu.set (x + BAR_W,  y + h - 1, "╩")
-    end
-
-    -- HINT row
+    -- ── Footer hint ───────────────────────────────────────────────────────────
     gpu.setForeground(C_DIM)
-    gpu.set(rColX, y + h - 1,
-        string.format("Interval: %ds     [Q] Quit   [Tab] Switch", cfg.checkInterval))
+    gpu.set(cx, y + h - 1,
+        string.format("Interval: %ds     [Q] Quit     [Tab] Switch", cfg.checkInterval))
 
     -- ── Error overlay ─────────────────────────────────────────────────────────
     if state.error then
         gpu.setForeground(C_NEG)
-        gpu.setBackground(0x000000)
-        gpu.set(x + 2, y + h - 2, ("ERR: " .. state.error):sub(1, w - 4))
+        gpu.set(cx, y + h - 2, ("ERR: " .. state.error):sub(1, w - 4))
     end
 
     gpu.setForeground(C_VALUE)

@@ -97,23 +97,6 @@ function ui.drawProgressBar(gpu, x, y, w, h, percent, fillColor)
     gpu.setBackground(0x000000)
 end
 
--- Vertical bar filling from bottom up, no border (border is part of outer box).
--- The region [x, x+w) × [y, y+h) is completely redrawn.
-function ui.drawVerticalBar(gpu, x, y, w, h, percent, fillColor)
-    local filled = math.floor(h * math.max(0, math.min(1, percent)))
-    local empty  = h - filled
-
-    if empty > 0 then
-        gpu.setBackground(0x0D0D1A)
-        gpu.fill(x, y, w, empty, " ")
-    end
-    if filled > 0 then
-        gpu.setBackground(fillColor)
-        gpu.fill(x, y + empty, w, filled, " ")
-    end
-    gpu.setBackground(0x000000)
-end
-
 -- ── Tab bar ───────────────────────────────────────────────────────────────────
 
 function ui.drawTabBar(gpu, screenW, modules, activeIdx)
