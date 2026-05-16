@@ -100,12 +100,17 @@ end
 local function getHistoryOrdered()
     local result = {}
     if state.histCount == 0 then return result end
+    -- Walk backwards from most-recent, fill result from end so oldest is at [1]
     local idx = (state.histHead - 2) % HISTORY_MAX + 1
-    for i = 1, state.histCount do
+    for i = state.histCount, 1, -1 do
         result[i] = state.history[idx]
         idx = (idx - 2) % HISTORY_MAX + 1
     end
     return result
+end
+
+function M.getHistory()
+    return getHistoryOrdered()
 end
 
 local function rebuildStockedList()
@@ -353,16 +358,14 @@ function M.stop() end
 -- ── drawUI ────────────────────────────────────────────────────────────────────
 
 function M.drawUI(gpu, x, y, w, h)
-    -- Dynamic column widths based on actual screen width
-    local colAW = math.floor((w - 2) / 3)
-    local colBW = math.floor((w - 2) / 3)
-    local colCW = w - colAW - colBW - 2
+    -- Two-column layout: STOCKED | PATTERNS
+    local colAW = math.floor((w - 1) * 0.38)
+    local colBW = w - colAW - 1
     local colBX = x + colAW + 1
-    local colCX = colBX + colBW + 1
 
-    -- Compute layout rows (relative to y)
-    local LIST_START = y + 4        -- row where list items begin
-    local LIST_END   = y + h - 13   -- last list row (leaves room for editor+footer)
+    -- Compute layout rows
+    local LIST_START = y + 4
+    local LIST_END   = y + h - 13
     local visRows    = math.max(1, LIST_END - LIST_START + 1)
     local SEP1_ROW   = LIST_END + 1
     local ED_START   = SEP1_ROW + 1
@@ -389,16 +392,13 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.setForeground(C_TITLE)
     gpu.set(x + 1, headerRow, "STOCKED")
     gpu.set(colBX, headerRow, string.format("PATTERNS (%d)", #state.filteredPats))
-    gpu.set(colCX, headerRow, "HISTORY")
 
-    -- Vertical separators (full height)
+    -- Single vertical separator
     gpu.setForeground(C_SEP)
     gpu.fill(colBX - 1, y + 2, 1, h - 14, "\xE2\x94\x82")
-    gpu.fill(colCX - 1, y + 2, 1, h - 14, "\xE2\x94\x82")
 
-    -- Sub-separator on stocked and history columns only
-    gpu.fill(x,      searchRow, colAW,  1, "\xE2\x94\x80")
-    gpu.fill(colCX,  searchRow, colCW,  1, "\xE2\x94\x80")
+    -- Sub-separator on stocked column only
+    gpu.fill(x, searchRow, colAW, 1, "\xE2\x94\x80")
 
     -- Search bar in patterns column
     local searchActive = (state.activePanel == "patterns") and not state.editorMode
@@ -456,26 +456,8 @@ function M.drawUI(gpu, x, y, w, h)
     end
 
     local listRows = visRows
-    drawList("stocked",  state.stockedList,  state.cursorStk, state.scrollStk, x,     colAW,  LIST_START, listRows)
-    drawList("patterns", state.filteredPats, state.cursorPat, state.scrollPat, colBX, colBW,  LIST_START, listRows)
-
-    -- ── HISTORY panel ─────────────────────────────────────────────────────────
-    local hist = getHistoryOrdered()
-    for i = 1, math.min(#hist, listRows) do
-        local e = hist[i]
-        local r = LIST_START + i - 1
-        local rightW = 15  -- "%5dx %-7s" = 5+1+1+7+1 margin
-        local labelW = colCW - 10 - rightW - 1
-        gpu.setForeground(C_DIM)
-        gpu.set(colCX, r, e.when)
-        gpu.setForeground(C_VALUE)
-        local lbl = unicode.sub(e.label, 1, labelW)
-        gpu.set(colCX + 9, r, lbl)
-        gpu.setForeground(e.status == "done" and C_POS or (e.status == "queued" and C_LABEL or C_NEG))
-        local right = string.format("%5dx %-7s", e.amount, e.status:sub(1,7))
-        gpu.set(colCX + colCW - rightW - 1, r, right)
-        gpu.setBackground(0x000000)
-    end
+    drawList("stocked",  state.stockedList,  state.cursorStk, state.scrollStk, x,     colAW, LIST_START, listRows)
+    drawList("patterns", state.filteredPats, state.cursorPat, state.scrollPat, colBX, colBW, LIST_START, listRows)
 
     -- ── Separator before editor ───────────────────────────────────────────────
     gpu.setForeground(C_SEP)

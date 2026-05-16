@@ -3,6 +3,7 @@
 local component = require("component")
 local computer  = require("computer")
 local os        = require("os")
+local unicode   = require("unicode")
 local ui        = require("lib/ui")
 
 local M = {}
@@ -31,6 +32,15 @@ local _detector    = nil
 local _lastCheck   = 0
 local _prevStored  = nil   -- for delta-based net flow
 local _prevTime    = nil
+local _stocker     = nil   -- lazy ref to item_stocker for crafting history
+
+local function getCraftingHistory()
+    if not _stocker then
+        local ok, m = pcall(require, "modules/item_stocker")
+        if ok and m then _stocker = m end
+    end
+    return (_stocker and _stocker.getHistory) and _stocker.getHistory() or {}
+end
 
 -- ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -263,6 +273,41 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.set(cx + 22, row, string.format(
         "ON >%.0f%%  ·  OFF <%.0f%%  ·  Side: %d",
         cfg.highThreshold * 100, cfg.lowThreshold * 100, cfg.redstoneSide))
+
+    -- ── Crafting History ──────────────────────────────────────────────────────
+    row = row + 2
+    gpu.setForeground(C_TITLE)
+    gpu.set(cx, row, "CRAFTING HISTORY")
+    gpu.setForeground(C_SEP)
+    local hsepStart = cx + 17
+    local hsepEnd   = x + w - 2
+    if hsepEnd > hsepStart then
+        gpu.fill(hsepStart, row, hsepEnd - hsepStart, 1, "─")
+    end
+
+    local hist      = getCraftingHistory()
+    local histStart = row + 1
+    local histEnd   = y + h - 3   -- leave room for footer + error
+    local maxRows   = math.max(0, histEnd - histStart + 1)
+    local startIdx  = math.max(1, #hist - maxRows + 1)
+    local rightW    = 16  -- "%5dx %-7s" + 1 margin
+    local labelW    = w - 4 - 9 - rightW - 1
+
+    for i = startIdx, #hist do
+        local e = hist[i]
+        local r = histStart + (i - startIdx)
+        if r > histEnd then break end
+        gpu.setForeground(C_DIM)
+        gpu.set(cx, r, e.when)
+        gpu.setForeground(C_VALUE)
+        gpu.set(cx + 9, r, unicode.sub(e.label, 1, labelW))
+        local statusColor = (e.status == "done") and C_POS
+                         or (e.status == "queued") and C_LABEL
+                         or C_NEG
+        gpu.setForeground(statusColor)
+        local right = string.format("%5dx %-7s", e.amount, e.status:sub(1, 7))
+        gpu.set(x + w - 1 - rightW, r, right)
+    end
 
     -- ── Footer hint ───────────────────────────────────────────────────────────
     gpu.setForeground(C_DIM)
