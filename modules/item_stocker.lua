@@ -176,16 +176,17 @@ local function refreshPatterns()
     rebuildFilteredPatterns()
 end
 
-local function jobFinished(pending, current, level)
-    if current >= level then return true end
-    if computer.uptime() - pending.requestedAt > CRAFT_TIMEOUT then return true end
+-- Returns a completion status string, or nil if still running.
+local function jobStatus(pending, current, level)
+    if current >= level then return "done" end
     if pending.job then
         local ok, done = pcall(function() return pending.job.isDone() end)
-        if ok and done then return true end
+        if ok and done then return "done" end
         local ok2, cancelled = pcall(function() return pending.job.isCanceled() end)
-        if ok2 and cancelled then return true end
+        if ok2 and cancelled then return "cancelled" end
     end
-    return false
+    if computer.uptime() - pending.requestedAt > CRAFT_TIMEOUT then return "timeout" end
+    return nil
 end
 
 local function checkAndStock()
@@ -201,13 +202,16 @@ local function checkAndStock()
         if entry.level and entry.level > 0 then
             local current = inStock[key] or 0
 
-            -- Clear finished jobs so we can request again
-            if _pendingJobs[key] and jobFinished(_pendingJobs[key], current, entry.level) then
-                _pendingJobs[key] = nil
+            -- Check if the pending job finished and log the result
+            if _pendingJobs[key] then
+                local s = jobStatus(_pendingJobs[key], current, entry.level)
+                if s then
+                    addHistory(entry.label or key, _pendingJobs[key].amount, s)
+                    _pendingJobs[key] = nil
+                else
+                    goto continue  -- still running, skip this item
+                end
             end
-
-            -- Skip if a job is still running
-            if _pendingJobs[key] then goto continue end
 
             if current < entry.level then
                 local deficit = entry.level - current
