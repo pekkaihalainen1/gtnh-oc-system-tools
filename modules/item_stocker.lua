@@ -381,23 +381,36 @@ function M.drawUI(gpu, x, y, w, h)
 
     -- ── Panel headers row ────────────────────────────────────────────────────
     local headerRow = y + 2
+    local searchRow = y + 3
     gpu.setForeground(C_TITLE)
     gpu.set(x + 1, headerRow, "STOCKED")
-    gpu.set(colBX, headerRow, "PATTERNS")
-    if state.searchStr ~= "" then
-        gpu.setForeground(C_DIM)
-        local srch = " / " .. state.searchStr
-        gpu.set(colBX + 8, headerRow, srch:sub(1, colBW - 9))
-    end
+    gpu.set(colBX, headerRow, string.format("PATTERNS (%d)", #state.filteredPats))
     gpu.set(colCX, headerRow, "HISTORY")
 
-    -- Vertical separators
+    -- Vertical separators (full height)
     gpu.setForeground(C_SEP)
-    gpu.fill(colBX - 1, y + 2, 1, h - 14, "\xE2\x94\x82")  -- "│"
+    gpu.fill(colBX - 1, y + 2, 1, h - 14, "\xE2\x94\x82")
     gpu.fill(colCX - 1, y + 2, 1, h - 14, "\xE2\x94\x82")
 
-    -- Sub-separator
-    gpu.fill(x, y + 3, w, 1, "\xE2\x94\x80")
+    -- Sub-separator on stocked and history columns only
+    gpu.fill(x,      searchRow, colAW,  1, "\xE2\x94\x80")
+    gpu.fill(colCX,  searchRow, colCW,  1, "\xE2\x94\x80")
+
+    -- Search bar in patterns column
+    local searchActive = (state.activePanel == "patterns") and not state.editorMode
+    if searchActive then
+        gpu.setBackground(C_ACT)
+        gpu.setForeground(C_LABEL)
+    else
+        gpu.setBackground(0x000000)
+        gpu.setForeground(C_DIM)
+    end
+    local searchPrefix = " Search: "
+    local searchMaxW   = colBW - #searchPrefix - 1
+    local searchText   = unicode.sub(state.searchStr, -searchMaxW)  -- show tail if long
+    local searchLine   = searchPrefix .. searchText .. (searchActive and "_" or " ")
+    gpu.set(colBX, searchRow, string.format("%-" .. colBW .. "s", searchLine):sub(1, colBW))
+    gpu.setBackground(0x000000)
 
     -- ── STOCKED list ─────────────────────────────────────────────────────────
     local function drawList(panel, items, cursor, scrollOff, px, pw, startRow, rows)
@@ -518,7 +531,7 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.fill(x, FOOT_ROW - 1, w, 1, "\xE2\x94\x80")
     gpu.setForeground(C_DIM)
     gpu.set(x + 2, FOOT_ROW,
-        "[Up/Down] Navigate  [Left/Right] Switch panel  [Enter] Edit  [Q] Quit  [Tab] Modules")
+        "[Up/Down] Navigate  [Left/Right] Switch panel  [Enter] Edit  [Type] Search patterns  [Esc] Clear search  [Q] Quit")
 
     -- ── Error overlay ─────────────────────────────────────────────────────────
     if state.error then
@@ -592,6 +605,11 @@ function M.handleKey(char, code)
         elseif state.activePanel == "patterns" and state.filteredPats[state.cursorPat] then
             local item = state.filteredPats[state.cursorPat]
             openEditor(item.key, item.label)
+        end
+    elseif code == keyboard.keys.escape then
+        if state.searchStr ~= "" then
+            state.searchStr = ""
+            rebuildFilteredPatterns()
         end
     elseif code == keyboard.keys.back then
         if state.activePanel == "patterns" and #state.searchStr > 0 then
