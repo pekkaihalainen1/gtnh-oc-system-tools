@@ -296,10 +296,28 @@ return M
     end
 
     -- Enable the service in /etc/rc.cfg
+    -- OpenOS loads this file with loadfile(), so it must be "return {...}"
     local rcCfgPath = "/etc/rc.cfg"
-    local rcCfg     = loadConfig(rcCfgPath)
+    local rcCfg = {}
+    local rcf = io.open(rcCfgPath, "r")
+    if rcf then
+        local chunk = load(rcf:read("*a"))
+        rcf:close()
+        if chunk then
+            local ok, data = pcall(chunk)
+            if ok and type(data) == "table" then rcCfg = data end
+        end
+    end
     rcCfg.gtnh_tools = true
-    saveConfig(rcCfgPath, rcCfg)
+    local rcw = io.open(rcCfgPath, "w")
+    if rcw then
+        rcw:write("return {\n")
+        for k, v in pairs(rcCfg) do
+            rcw:write(string.format("  %s = %s,\n", tostring(k), tostring(v)))
+        end
+        rcw:write("}\n")
+        rcw:close()
+    end
     io.write("  Enabled gtnh_tools in " .. rcCfgPath .. "\n\n")
 
     io.write("Run  lua " .. installRoot .. "main.lua  to start.\n")
