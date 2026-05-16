@@ -342,13 +342,12 @@ function M.update()
     if now - state.lastCheck < M.config.checkInterval then return end
     state.lastCheck = now
 
-    local okP, errP = pcall(refreshPatterns)
     local okS, errS = pcall(checkAndStock)
 
-    if okP and okS then
+    if okS then
         state.error = nil
     else
-        state.error = tostring(not okP and errP or errS)
+        state.error = tostring(errS)
     end
     state.lastUpdate = os.date("%H:%M:%S")
 end
@@ -519,7 +518,7 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.fill(x, FOOT_ROW - 1, w, 1, "\xE2\x94\x80")
     gpu.setForeground(C_DIM)
     gpu.set(x + 2, FOOT_ROW,
-        "[Up/Down] Navigate  [Left/Right] Switch panel  [Enter] Edit  [Type] Search patterns  [Esc] Clear search  [Q] Quit")
+        "[Up/Down] Navigate  [Left/Right] Switch panel  [Enter] Edit  [Type] Search  [Esc] Clear  [Home] Refresh patterns  [Q] Quit")
 
     -- ── Error overlay ─────────────────────────────────────────────────────────
     if state.error then
@@ -603,6 +602,10 @@ function M.handleKey(char, code)
         if state.activePanel == "patterns" and #state.searchStr > 0 then
             state.searchStr = unicode.sub(state.searchStr, 1, unicode.len(state.searchStr) - 1)
             rebuildFilteredPatterns()
+        end
+    elseif code == keyboard.keys.home then
+        if state.me then
+            pcall(refreshPatterns)
         end
     elseif char >= 32 and char < 127 and state.activePanel == "patterns" then
         state.searchStr = state.searchStr .. string.char(char)
