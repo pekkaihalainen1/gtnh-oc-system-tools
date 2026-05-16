@@ -19,6 +19,7 @@ local FILES = {
 
 local component  = require("component")
 local filesystem = require("filesystem")
+local computer   = require("computer")
 local io         = require("io")
 
 if not component.isAvailable("internet") then
@@ -37,17 +38,21 @@ local function fetch(url)
         return nil, "request failed: " .. tostring(handle)
     end
 
-    -- Wait for response (handle.response() blocks until headers arrive)
+    -- Poll for headers with a real time-based timeout and sleeps so the
+    -- network stack gets CPU time between checks.
+    local deadline = computer.uptime() + 15
     local status, reason
-    local attempts = 0
     repeat
-        attempts = attempts + 1
         status, reason = handle.response()
-        if not status and attempts > 100 then
-            handle.close()
-            return nil, "timeout waiting for response"
+        if not status then
+            os.sleep(0.25)
         end
-    until status
+    until status or computer.uptime() > deadline
+
+    if not status then
+        handle.close()
+        return nil, "timeout waiting for response"
+    end
 
     if status ~= 200 then
         handle.close()
