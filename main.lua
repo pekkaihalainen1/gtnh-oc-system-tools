@@ -31,11 +31,16 @@ local function fatal(msg)
     error(tostring(msg), 0)
 end
 
-local function initGPU()
+local function initGPU(gpuAddress)
     if not component.isAvailable("gpu") then
         fatal("No GPU found. Install a graphics card.")
     end
-    gpu = component.gpu
+
+    if gpuAddress and component.type(gpuAddress) == "gpu" then
+        gpu = component.proxy(gpuAddress)
+    else
+        gpu = component.gpu
+    end
 
     if not component.isAvailable("screen") then
         fatal("No screen found. Connect a screen.")
@@ -79,16 +84,12 @@ end
 
 local function main()
     -- GPU first so fatal() can write to screen
-    initGPU()
-
-    -- Build defaults table: { [module.id] = module.config }
+    -- Load config early so GPU address is available before initGPU
+    local filesystem = require("filesystem")
     local defaults = {}
     for _, mod in ipairs(MODULES) do
         defaults[mod.id] = mod.config
     end
-
-    -- Load config, injecting saved values back into each module
-    local filesystem = require("filesystem")
     local firstRun = not filesystem.exists(CONFIG_PATH)
     cfg = config.load(CONFIG_PATH, defaults)
     for _, mod in ipairs(MODULES) do
@@ -96,11 +97,11 @@ local function main()
             mod.config = cfg[mod.id]
         end
     end
-
-    -- Write defaults to disk on first run so the user can edit the file
     if firstRun then
         config.save(CONFIG_PATH, cfg)
     end
+
+    initGPU(cfg.gpu)
 
     -- Initialize each module
     for _, mod in ipairs(MODULES) do
@@ -120,8 +121,7 @@ local function main()
 
     -- Event loop
     while true do
-        local ev, _, char, code = event.pull(REDRAW_INTERVAL,
-                                             "key_down", "interrupted")
+        local ev, _, char, code = event.pull(REDRAW_INTERVAL)
 
         -- Run pending module logic (respects each module's own interval)
         for _, mod in ipairs(MODULES) do

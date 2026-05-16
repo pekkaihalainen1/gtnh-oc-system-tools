@@ -17,10 +17,12 @@ local FILES = {
 
 -- ── Dependencies ─────────────────────────────────────────────────────────────
 
-local component  = require("component")
-local filesystem = require("filesystem")
-local computer   = require("computer")
-local io         = require("io")
+local component     = require("component")
+local filesystem    = require("filesystem")
+local computer      = require("computer")
+local event         = require("event")
+local serialization = require("serialization")
+local io            = require("io")
 
 if not component.isAvailable("internet") then
     io.write("ERROR: No Internet Card found. Install one and try again.\n")
@@ -29,17 +31,14 @@ end
 
 local internet = component.internet
 
--- ── Helpers ──────────────────────────────────────────────────────────────────
+-- ── File download helpers ─────────────────────────────────────────────────────
 
--- Download url and return body as string, or nil + error message
 local function fetch(url)
     local ok, handle = pcall(internet.request, url)
     if not ok then
         return nil, "request failed: " .. tostring(handle)
     end
 
-    -- Poll for headers with a real time-based timeout and sleeps so the
-    -- network stack gets CPU time between checks.
     local deadline = computer.uptime() + 15
     local status, reason
     repeat
@@ -70,7 +69,6 @@ local function fetch(url)
     return table.concat(body)
 end
 
--- Ensure all parent directories for a path exist
 local function mkdirs(path)
     local dir = filesystem.path(path)
     if dir and dir ~= "" and not filesystem.isDirectory(dir) then
@@ -82,11 +80,9 @@ local function mkdirs(path)
     return true
 end
 
--- Write string content to path, creating parents as needed
 local function writeFile(path, content)
     local ok, err = mkdirs(path)
     if not ok then return false, err end
-
     local f, ferr = io.open(path, "w")
     if not f then return false, ferr end
     f:write(content)
@@ -94,29 +90,130 @@ local function writeFile(path, content)
     return true
 end
 
--- ── Install root = directory containing setup.lua ────────────────────────────
+-- ── Install root ──────────────────────────────────────────────────────────────
 
 local function scriptDir()
-    -- os.getenv("_") holds the running script path on OC OpenOS
     local script = os.getenv("_") or ""
     local dir = filesystem.path(script)
     return (dir and dir ~= "") and dir or filesystem.workPath()
 end
 
 local installRoot = scriptDir()
-
--- Normalise: ensure trailing slash
 if installRoot:sub(-1) ~= "/" then
     installRoot = installRoot .. "/"
 end
 
--- ── Main ─────────────────────────────────────────────────────────────────────
+-- ── GPU selection UI ──────────────────────────────────────────────────────────
+
+local function pickGPU(gpu, screenW, screenH)
+    -- Collect all GPUs with their capabilities
+    local gpus = {}
+    for addr in component.list("gpu") do
+        local maxW, maxH = component.invoke(addr, "maxResolution")
+        local depth      = component.invoke(addr, "maxDepth")
+        local tier = depth == 8 and "T3" or depth == 4 and "T2" or "T1"
+        table.insert(gpus, {
+            address   = addr,
+            shortAddr = addr:sub(1, 13) .. "...",
+            maxW      = maxW,
+            maxH      = maxH,
+            tier      = tier,
+        })
+    end
+
+    if #gpus == 0 then
+        io.write("No GPU found — skipping GPU selection.\n")
+        return nil
+    end
+
+    if #gpus == 1 then
+        io.write("Single GPU found, selecting it automatically.\n")
+        return gpus[1].address
+    end
+
+    -- Draw selection screen
+    local BOX_H    = 3
+    local BOX_X    = 4
+    local BOX_W    = screenW - 6
+    local START_Y  = 5
+
+    gpu.setBackground(0x000000)
+    gpu.fill(1, 1, screenW, screenH, " ")
+
+    gpu.setForeground(0x00FFFF)
+    gpu.set(3, 2, "Select GPU for GTNH OC System Tools")
+    gpu.setForeground(0x666666)
+    gpu.set(3, 3, "Click a box to choose. Timeout in 60s = first GPU.")
+
+    local boxes = {}
+    for i, g in ipairs(gpus) do
+        local y = START_Y + (i - 1) * (BOX_H + 1)
+        boxes[i] = { y = y, h = BOX_H }
+
+        gpu.setBackground(0x1a1a2e)
+        gpu.setForeground(0xFFFFFF)
+        gpu.fill(BOX_X, y, BOX_W, BOX_H, " ")
+
+        gpu.setForeground(0xFFFF00)
+        gpu.set(BOX_X + 2, y + 1,
+            string.format("[%d]  %s  %s  %dx%d max",
+                i, g.tier, g.shortAddr, g.maxW, g.maxH))
+    end
+    gpu.setBackground(0x000000)
+
+    -- Wait for a mouse click
+    local selected = nil
+    local deadline = computer.uptime() + 60
+    while computer.uptime() < deadline do
+        local remaining = deadline - computer.uptime()
+        local ev, _, x, y = event.pull(math.min(remaining, 1), "touch")
+        if ev == "touch" then
+            for i, box in ipairs(boxes) do
+                if y >= box.y and y < box.y + box.h
+                        and x >= BOX_X and x <= BOX_X + BOX_W then
+                    selected = gpus[i]
+                    break
+                end
+            end
+            if selected then break end
+        end
+    end
+
+    gpu.fill(1, 1, screenW, screenH, " ")
+
+    if selected then
+        io.write("Selected GPU: " .. selected.address .. "\n")
+        return selected.address
+    else
+        io.write("Timeout — using first GPU.\n")
+        return gpus[1].address
+    end
+end
+
+-- ── Config helpers ────────────────────────────────────────────────────────────
+
+local function loadConfig(path)
+    local f = io.open(path, "r")
+    if not f then return {} end
+    local raw = f:read("*a")
+    f:close()
+    local ok, data = pcall(serialization.unserialize, raw)
+    return (ok and type(data) == "table") and data or {}
+end
+
+local function saveConfig(path, data)
+    local f = io.open(path, "w")
+    if not f then return end
+    f:write(serialization.serialize(data))
+    f:close()
+end
+
+-- ── Main ──────────────────────────────────────────────────────────────────────
 
 io.write("=== GTNH OC System Tools Setup ===\n")
 io.write("Install root: " .. installRoot .. "\n\n")
 
--- Remove any existing managed files so stale code doesn't linger.
--- Config files are intentionally skipped.
+-- Clean existing managed files (not config)
 io.write("Cleaning existing files...\n")
 for _, relPath in ipairs(FILES) do
     local destPath = installRoot .. relPath
@@ -127,7 +224,8 @@ for _, relPath in ipairs(FILES) do
 end
 io.write("\n")
 
-local ok_count = 0
+-- Download files
+local ok_count   = 0
 local fail_count = 0
 
 for _, relPath in ipairs(FILES) do
@@ -152,9 +250,22 @@ for _, relPath in ipairs(FILES) do
     end
 end
 
-io.write(string.format("\nDone: %d/%d files installed.\n", ok_count, ok_count + fail_count))
+io.write(string.format("\nDone: %d/%d files installed.\n\n", ok_count, ok_count + fail_count))
 
+-- GPU selection (only when all files downloaded OK)
 if fail_count == 0 then
+    local gpu      = component.gpu
+    local screenW, screenH = gpu.getResolution()
+    local gpuAddr  = pickGPU(gpu, screenW, screenH)
+
+    if gpuAddr then
+        local configPath = installRoot .. "config.cfg"
+        local cfg = loadConfig(configPath)
+        cfg.gpu = gpuAddr
+        saveConfig(configPath, cfg)
+        io.write("GPU address saved to config.cfg\n\n")
+    end
+
     io.write("Run  lua " .. installRoot .. "main.lua  to start.\n")
 else
     io.write("Some files failed — check your internet card and try again.\n")
