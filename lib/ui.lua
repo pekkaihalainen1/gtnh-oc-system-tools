@@ -111,8 +111,8 @@ function ui.drawTabBar(gpu, screenW, modules, activeIdx)
             gpu.setBackground(0x00AAAA)
             gpu.setForeground(0x000000)
         else
-            gpu.setBackground(0x222233)
-            gpu.setForeground(0x8888AA)
+            gpu.setBackground(0x002222)
+            gpu.setForeground(0x008888)
         end
         if x + len - 1 <= screenW then
             gpu.set(x, 1, label)
@@ -122,7 +122,7 @@ function ui.drawTabBar(gpu, screenW, modules, activeIdx)
 
     if x <= screenW then
         gpu.setBackground(0x000000)
-        gpu.setForeground(0x333355)
+        gpu.setForeground(0x004444)
         gpu.fill(x, 1, screenW - x + 1, 1, "─")
     end
 

@@ -9,7 +9,6 @@
 local BASE_URL = "https://raw.githubusercontent.com/pekkaihalainen1/gtnh-oc-system-tools/refs/heads/main/"
 
 local FILES = {
-    "autorun.lua",
     "main.lua",
     "lib/config.lua",
     "lib/ui.lua",
@@ -266,6 +265,42 @@ if fail_count == 0 then
         saveConfig(configPath, cfg)
         io.write("GPU address saved to config.cfg\n\n")
     end
+
+    -- ── Register OpenOS rc service for autorun on boot ────────────────────────
+    io.write("Configuring autorun via OpenOS rc system...\n")
+
+    -- Write the rc.d service script with the install path baked in
+    local rcDir     = "/etc/rc.d/"
+    local rcScript  = rcDir .. "gtnh_tools.lua"
+    local mainPath  = installRoot .. "main.lua"
+
+    if not filesystem.isDirectory(rcDir) then
+        filesystem.makeDirectory(rcDir)
+    end
+
+    local svc = io.open(rcScript, "w")
+    if svc then
+        svc:write(string.format([[
+local M = {}
+function M.start()
+    local shell = require("shell")
+    shell.execute(%q)
+end
+function M.stop() end
+return M
+]], mainPath))
+        svc:close()
+        io.write("  Written " .. rcScript .. "\n")
+    else
+        io.write("  WARNING: could not write " .. rcScript .. "\n")
+    end
+
+    -- Enable the service in /etc/rc.cfg
+    local rcCfgPath = "/etc/rc.cfg"
+    local rcCfg     = loadConfig(rcCfgPath)
+    rcCfg.gtnh_tools = true
+    saveConfig(rcCfgPath, rcCfg)
+    io.write("  Enabled gtnh_tools in " .. rcCfgPath .. "\n\n")
 
     io.write("Run  lua " .. installRoot .. "main.lua  to start.\n")
 else
