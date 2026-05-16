@@ -33,7 +33,9 @@ local _thread     = nil
 -- ── Component helpers ────────────────────────────────────────────────────────
 
 local function findDetector()
-    if component.isAvailable("gt_energydetector") then
+    if component.isAvailable("gt_machine") then
+        return component.gt_machine
+    elseif component.isAvailable("gt_energydetector") then
         return component.gt_energydetector
     elseif component.isAvailable("energy_device") then
         return component.energy_device
@@ -42,7 +44,13 @@ local function findDetector()
 end
 
 local function readEnergy(det)
-    if det.getEnergyStored and det.getMaxEnergyStored then
+    -- GT machine adapter (Lapotronic Supercapacitor via OC Adapter block)
+    if det.getEUStored and det.getEUCapacity then
+        local cur = det.getEUStored()
+        local max = det.getEUCapacity()
+        if max == 0 then return 0 end
+        return cur / max
+    elseif det.getEnergyStored and det.getMaxEnergyStored then
         local cur = det.getEnergyStored()
         local max = det.getMaxEnergyStored()
         if max == 0 then return 0 end
@@ -74,7 +82,7 @@ function M.init(gpu, screenW, screenH)
 
     _detector = findDetector()
     if not _detector then
-        return false, "No energy detector found (gt_energydetector or energy_device)"
+        return false, "No energy detector found (gt_machine, gt_energydetector, or energy_device)"
     end
 
     -- Start with redstone off
