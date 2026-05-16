@@ -34,14 +34,14 @@ local _prevTime    = nil
 
 -- ── Colors ────────────────────────────────────────────────────────────────────
 
-local C_TITLE  = 0xFF00FF   -- magenta: accent only (NIDAS style)
-local C_LABEL  = 0x00FFFF   -- bright cyan: primary text
-local C_VALUE  = 0x00FFFF   -- bright cyan: values
-local C_DIM    = 0x007777   -- dark teal: secondary/dim text
+local C_TITLE  = 0xFF00FF   -- magenta: accent only
+local C_LABEL  = 0x00A6FF   -- primary text
+local C_VALUE  = 0x00A6FF   -- values
+local C_DIM    = 0x004477   -- secondary/dim text
 local C_PANEL  = 0x001111   -- near-black: empty bar background
-local C_POS    = 0x00FFFF   -- cyan: positive flow (charging)
-local C_NEG    = 0xFF00FF   -- magenta: negative flow (draining) — draws attention
-local C_SEP    = 0x004444   -- very dark teal: separator lines
+local C_POS    = 0x00A6FF   -- positive flow (charging)
+local C_NEG    = 0xFF00FF   -- magenta: negative flow (draining)
+local C_SEP    = 0x003355   -- separator lines
 
 -- ── Component helpers ─────────────────────────────────────────────────────────
 
