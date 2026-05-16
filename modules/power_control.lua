@@ -37,11 +37,11 @@ local _prevTime    = nil
 local C_TITLE  = 0xFF00FF
 local C_LABEL  = 0x00CCCC
 local C_VALUE  = 0xFFFFFF
-local C_DIM    = 0x555577
+local C_DIM    = 0x1155CC
 local C_PANEL  = 0x111122
 local C_POS    = 0x00FF88
 local C_NEG    = 0xFF4444
-local C_SEP    = 0x008888
+local C_SEP    = 0x1155CC
 
 -- ── Component helpers ─────────────────────────────────────────────────────────
 

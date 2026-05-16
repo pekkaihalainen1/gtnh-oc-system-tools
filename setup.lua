@@ -9,6 +9,7 @@
 local BASE_URL = "https://raw.githubusercontent.com/pekkaihalainen1/gtnh-oc-system-tools/refs/heads/main/"
 
 local FILES = {
+    "autorun.lua",
     "main.lua",
     "lib/config.lua",
     "lib/ui.lua",
