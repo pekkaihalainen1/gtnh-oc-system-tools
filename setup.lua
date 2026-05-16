@@ -13,6 +13,7 @@ local FILES = {
     "lib/config.lua",
     "lib/ui.lua",
     "modules/power_control.lua",
+    "modules/item_stocker.lua",
 }
 
 -- ── Dependencies ─────────────────────────────────────────────────────────────

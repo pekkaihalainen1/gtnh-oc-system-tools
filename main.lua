@@ -12,6 +12,7 @@ local ui        = require("lib/ui")
 -- ── Module registry (add new modules here) ───────────────────────────────────
 local MODULES = {
     require("modules/power_control"),
+    require("modules/item_stocker"),
 }
 
 -- ── Config ───────────────────────────────────────────────────────────────────
@@ -121,7 +122,7 @@ local function main()
 
     -- Event loop
     while true do
-        local ev, _, char, code = event.pull(REDRAW_INTERVAL)
+        local ev, _, a, b, c = event.pull(REDRAW_INTERVAL)
 
         -- Run pending module logic (respects each module's own interval)
         for _, mod in ipairs(MODULES) do
@@ -131,13 +132,16 @@ local function main()
         if ev == "interrupted" then
             break
         elseif ev == "key_down" then
-            if char == string.byte("q") or char == string.byte("Q") then
+            if a == string.byte("q") or a == string.byte("Q") then
                 break
-            elseif code == keyboard.keys.tab then
+            elseif b == keyboard.keys.tab then
                 activeIdx = (activeIdx % #MODULES) + 1
             else
-                MODULES[activeIdx].handleKey(char, code)
+                MODULES[activeIdx].handleKey(a, b)
             end
+        elseif ev == "touch" then
+            local m = MODULES[activeIdx]
+            if m.handleTouch then m.handleTouch(a, b, c) end
         end
 
         redraw()
