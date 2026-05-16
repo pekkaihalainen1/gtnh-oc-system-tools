@@ -145,36 +145,45 @@ end
 
 -- ── Component helpers ─────────────────────────────────────────────────────────
 
+local function extractItemInfo(c)
+    -- Try getItemStack() method (some AE2 OC versions)
+    local ok, stack = pcall(function() return c.getItemStack() end)
+    if ok and type(stack) == "table" and stack.label then
+        return stack.label, stack.name, stack.damage
+    end
+    -- Try direct fields (plain table or proxy with string properties)
+    local label  = type(c.label)  == "string" and c.label  or nil
+    local name   = type(c.name)   == "string" and c.name   or nil
+    local damage = type(c.damage) == "number" and c.damage or 0
+    return label, name, damage
+end
+
 local function refreshPatterns()
     local list = state.me.getCraftables() or {}
-    local newPats = {}
+    local newPats  = {}
     local newByKey = {}
-    for _, c in ipairs(list) do
-        local info
-        if type(c.getItemStack) == "function" then
-            local ok, stack = pcall(c.getItemStack)
-            if ok and type(stack) == "table" then info = stack end
-        end
-        if not info then
-            info = { label = c.label, name = c.name, damage = c.damage }
-        end
-        if info and info.label then
-            local k = itemKey(info.name, info.damage)
-            newPats[#newPats + 1] = { key = k, label = tostring(info.label), craftable = c }
-            newByKey[k] = c
+    -- Use pairs: AE2 OC may return a non-sequential table
+    for _, c in pairs(list) do
+        if type(c) == "table" or type(c) == "userdata" then
+            local label, name, damage = extractItemInfo(c)
+            if label then
+                local k = itemKey(name or "unknown", damage or 0)
+                newPats[#newPats + 1] = { key = k, label = tostring(label), craftable = c }
+                newByKey[k] = c
+            end
         end
     end
     table.sort(newPats, function(a, b) return a.label:lower() < b.label:lower() end)
     state.patterns = newPats
-    _patsByKey = newByKey
+    _patsByKey     = newByKey
     rebuildFilteredPatterns()
 end
 
 local function checkAndStock()
     local inStock = {}
     local items = state.me.getItemsInNetwork() or {}
-    for _, item in ipairs(items) do
-        if item.name then
+    for _, item in pairs(items) do
+        if type(item) == "table" and item.name then
             inStock[itemKey(item.name, item.damage)] = item.size or 0
         end
     end
@@ -190,9 +199,17 @@ local function checkAndStock()
                 if not craftable then
                     addHistory(entry.label or key, amount, "no pattern")
                 else
-                    local ok, _ = pcall(function()
-                        craftable:request(amount, true, nil)
+                    -- dot notation: OC proxy methods must NOT be called with colon
+                    local ok, err = pcall(function()
+                        craftable.request(amount, true, nil)
                     end)
+                    if not ok then
+                        -- fallback: some versions use me_interface.requestCrafting
+                        local ok2, _ = pcall(function()
+                            state.me.requestCrafting({name=entry.name, damage=entry.damage}, amount)
+                        end)
+                        ok = ok2
+                    end
                     addHistory(entry.label or key, amount, ok and "queued" or "err")
                 end
             end
