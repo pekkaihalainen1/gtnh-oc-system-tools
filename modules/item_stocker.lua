@@ -82,6 +82,20 @@ local function itemKey(name, damage)
     return tostring(name) .. ":" .. tostring(damage or 0)
 end
 
+-- Inverse of itemKey: split "modid:item_name:damage" back into (name, damage).
+-- The damage is always the part after the LAST colon, so item names with
+-- their own colons (modid:item) are preserved correctly.
+local function parseKey(key)
+    local lastColon = nil
+    for i = #key, 1, -1 do
+        if key:sub(i, i) == ":" then lastColon = i; break end
+    end
+    if lastColon then
+        return key:sub(1, lastColon - 1), tonumber(key:sub(lastColon + 1)) or 0
+    end
+    return key, 0
+end
+
 local function clampScroll(cursor, scrollOff, visible)
     if cursor < scrollOff + 1           then scrollOff = cursor - 1 end
     if cursor > scrollOff + visible     then scrollOff = cursor - visible end
@@ -270,6 +284,11 @@ local function processItem(key, entry, current)
         if s then
             addHistory(entry.label or key, _pendingJobs[key].amount, s)
             _pendingJobs[key] = nil
+            -- A bad outcome may indicate a stale craftable reference.
+            -- Refresh patterns so the next request uses a fresh object.
+            if s == "failed" or s == "stalled" or s == "timeout" or s == "cancelled" then
+                pcall(refreshPatterns)
+            end
         else
             return  -- still running, leave it alone
         end
@@ -287,13 +306,20 @@ local function processItem(key, entry, current)
         return
     end
 
-    -- Try single-arg form first (most compatible); fall back if needed.
-    local ok, job = pcall(function() return craftable.request(amount) end)
+    -- Original working signature first; fall back to alternates if needed.
+    local ok, job = pcall(function() return craftable.request(amount, true, nil) end)
     if not ok or job == nil then
         ok, job = pcall(function() return craftable.request(amount, false) end)
     end
     if not ok or job == nil then
-        ok, job = pcall(function() return craftable.request(amount, true, nil) end)
+        ok, job = pcall(function() return craftable.request(amount) end)
+    end
+    -- Last resort: ME-level requestCrafting using the parsed key
+    if not ok or job == nil then
+        local name, damage = parseKey(key)
+        ok, job = pcall(function()
+            return state.me.requestCrafting({name = name, damage = damage}, amount)
+        end)
     end
 
     if ok and job ~= nil then
