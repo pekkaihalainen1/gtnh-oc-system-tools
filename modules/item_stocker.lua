@@ -103,6 +103,40 @@ local function clampScroll(cursor, scrollOff, visible)
     return scrollOff
 end
 
+-- ── Real-time helpers (must be defined before addHistory uses them) ──────────
+
+local function syncRealTime()
+    if not component.isAvailable("internet") then return end
+    local ok, handle = pcall(component.internet.request, "http://worldtimeapi.org/api/ip")
+    if not ok then return end
+    local deadline = computer.uptime() + 8
+    local status
+    repeat
+        status = handle.response()
+        if not status then os.sleep(0.1) end
+    until status or computer.uptime() > deadline
+    if status ~= 200 then handle.close(); return end
+    local body = {}
+    while true do
+        local chunk = handle.read(8192)
+        if not chunk then break end
+        body[#body + 1] = chunk
+    end
+    handle.close()
+    local unixtime = tonumber(table.concat(body):match('"unixtime":(%d+)'))
+    if unixtime then
+        _epochOffset = unixtime - computer.uptime()
+    end
+end
+
+local function realTimeStr()
+    if not _epochOffset then
+        return os.date("%H:%M:%S")  -- fallback: Minecraft time
+    end
+    local t = math.floor(_epochOffset + computer.uptime())
+    return string.format("%02d:%02d:%02d", math.floor(t / 3600) % 24, math.floor(t / 60) % 60, t % 60)
+end
+
 local function addHistory(label, amount, status)
     state.history[state.histHead] = {
         label  = unicode.sub(tostring(label), 1, 20),
@@ -166,40 +200,6 @@ local function rebuildFilteredPatterns()
     end
     state.cursorPat = math.max(1, math.min(state.cursorPat, math.max(1, #state.filteredPats)))
     state.scrollPat = clampScroll(state.cursorPat, state.scrollPat, VISIBLE_ROWS)
-end
-
--- ── Real-time helpers ────────────────────────────────────────────────────────
-
-local function syncRealTime()
-    if not component.isAvailable("internet") then return end
-    local ok, handle = pcall(component.internet.request, "http://worldtimeapi.org/api/ip")
-    if not ok then return end
-    local deadline = computer.uptime() + 8
-    local status
-    repeat
-        status = handle.response()
-        if not status then os.sleep(0.1) end
-    until status or computer.uptime() > deadline
-    if status ~= 200 then handle.close(); return end
-    local body = {}
-    while true do
-        local chunk = handle.read(8192)
-        if not chunk then break end
-        body[#body + 1] = chunk
-    end
-    handle.close()
-    local unixtime = tonumber(table.concat(body):match('"unixtime":(%d+)'))
-    if unixtime then
-        _epochOffset = unixtime - computer.uptime()
-    end
-end
-
-local function realTimeStr()
-    if not _epochOffset then
-        return os.date("%H:%M:%S")  -- fallback: Minecraft time
-    end
-    local t = math.floor(_epochOffset + computer.uptime())
-    return string.format("%02d:%02d:%02d", math.floor(t / 3600) % 24, math.floor(t / 60) % 60, t % 60)
 end
 
 -- ── Component helpers ─────────────────────────────────────────────────────────
