@@ -259,6 +259,58 @@ local function jobStatus(pending, current, level)
     return nil
 end
 
+-- Process a single stocked item. Isolated from other items so a thrown
+-- error here cannot block siblings. Returns nothing meaningful.
+local function processItem(key, entry, current)
+    if not (entry.level and entry.level > 0) then return end
+
+    -- Resolve pending job if there is one
+    if _pendingJobs[key] then
+        local s = jobStatus(_pendingJobs[key], current, entry.level)
+        if s then
+            addHistory(entry.label or key, _pendingJobs[key].amount, s)
+            _pendingJobs[key] = nil
+        else
+            return  -- still running, leave it alone
+        end
+    end
+
+    if current >= entry.level then return end
+
+    local deficit = entry.level - current
+    local amount  = (entry.perCycle and entry.perCycle > 0)
+                    and math.min(deficit, entry.perCycle)
+                    or  deficit
+    local craftable = _patsByKey[key]
+    if not craftable then
+        addHistory(entry.label or key, amount, "no pattern")
+        return
+    end
+
+    -- Try single-arg form first (most compatible); fall back if needed.
+    local ok, job = pcall(function() return craftable.request(amount) end)
+    if not ok or job == nil then
+        ok, job = pcall(function() return craftable.request(amount, false) end)
+    end
+    if not ok or job == nil then
+        ok, job = pcall(function() return craftable.request(amount, true, nil) end)
+    end
+
+    if ok and job ~= nil then
+        local now = computer.uptime()
+        _pendingJobs[key] = {
+            job            = job,
+            requestedAt    = now,
+            amount         = amount,
+            lastSeenStock  = current,
+            lastProgressAt = now,
+        }
+        addHistory(entry.label or key, amount, "queued")
+    else
+        addHistory(entry.label or key, amount, "err")
+    end
+end
+
 local function checkAndStock()
     local inStock = {}
     local items = state.me.getItemsInNetwork() or {}
@@ -269,62 +321,14 @@ local function checkAndStock()
     end
     state.inStock = inStock
 
+    -- Isolate each item: a thrown error processing one must not prevent
+    -- the others from being processed in the same cycle.
     for key, entry in pairs(M.config.stockList) do
-        if entry.level and entry.level > 0 then
-            local current = inStock[key] or 0
-
-            -- Check if the pending job finished and log the result
-            if _pendingJobs[key] then
-                local s = jobStatus(_pendingJobs[key], current, entry.level)
-                if s then
-                    addHistory(entry.label or key, _pendingJobs[key].amount, s)
-                    _pendingJobs[key] = nil
-                else
-                    goto continue  -- still running, skip this item
-                end
-            end
-
-            if current < entry.level then
-                local deficit = entry.level - current
-                local amount  = (entry.perCycle and entry.perCycle > 0)
-                                and math.min(deficit, entry.perCycle)
-                                or  deficit
-                local craftable = _patsByKey[key]
-                if not craftable then
-                    addHistory(entry.label or key, amount, "no pattern")
-                else
-                    -- Try single-arg form first (most compatible); fall back
-                    -- to longer signatures if needed.
-                    local ok, job = pcall(function()
-                        return craftable.request(amount)
-                    end)
-                    if not ok or job == nil then
-                        ok, job = pcall(function()
-                            return craftable.request(amount, false)
-                        end)
-                    end
-                    if not ok or job == nil then
-                        ok, job = pcall(function()
-                            return craftable.request(amount, true, nil)
-                        end)
-                    end
-                    if ok then
-                        local now = computer.uptime()
-                        _pendingJobs[key] = {
-                            job            = job,
-                            requestedAt    = now,
-                            amount         = amount,
-                            lastSeenStock  = current,
-                            lastProgressAt = now,
-                        }
-                        addHistory(entry.label or key, amount, "queued")
-                    else
-                        addHistory(entry.label or key, amount, "err")
-                    end
-                end
-            end
-
-            ::continue::
+        local current = inStock[key] or 0
+        local ok, err = pcall(processItem, key, entry, current)
+        if not ok then
+            addHistory(entry.label or key, 0, "err")
+            _pendingJobs[key] = nil  -- prevent permanent block on a bad job
         end
     end
 end
