@@ -239,25 +239,22 @@ local function refreshPatterns()
 end
 
 -- Returns a completion status string, or nil if still running.
--- Combines job-object status checks (hasFailed/isCanceled/isDone) with
--- stock-movement detection. Any of: target reached, job reports failure,
--- or stock frozen for STALL_WINDOW → triggers re-queue on next cycle.
+-- Stock-based detection only. The AE2 OC API's hasFailed() lies in this
+-- version (returns true for jobs that are crafting AND for completed
+-- ones), so we ignore it entirely. isDone() is trusted only when it
+-- says "true" — we treat "false" as "no information" and rely on stock.
 local function jobStatus(pending, current, level)
     local now = computer.uptime()
 
     if current >= level then return "done" end
 
+    -- Trust isDone() only when positive (fast-path completion)
     if pending.job then
         local okD, done = pcall(function() return pending.job.isDone() end)
         if okD and done then return "done" end
-
-        local okF, failed = pcall(function() return pending.job.hasFailed() end)
-        if okF and failed then return "failed" end
-
-        local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
-        if okC and cancelled then return "cancelled" end
     end
 
+    -- Any stock change = network is alive; reset stall timer
     pending.lastSeenStock = pending.lastSeenStock or current
     if current ~= pending.lastSeenStock then
         pending.lastSeenStock  = current
@@ -284,9 +281,9 @@ local function processItem(key, entry, current)
         if s then
             addHistory(entry.label or key, _pendingJobs[key].amount, s)
             _pendingJobs[key] = nil
-            -- A bad outcome may indicate a stale craftable reference.
+            -- A stall/timeout may indicate a stale craftable reference.
             -- Refresh patterns so the next request uses a fresh object.
-            if s == "failed" or s == "stalled" or s == "timeout" or s == "cancelled" then
+            if s == "stalled" or s == "timeout" then
                 pcall(refreshPatterns)
             end
         else
@@ -541,14 +538,7 @@ function M.drawUI(gpu, x, y, w, h)
                     local right
                     if pending then
                         local age = math.floor(computer.uptime() - pending.requestedAt)
-                        local tag = "wait"
-                        if pending.job then
-                            local okF, failed = pcall(function() return pending.job.hasFailed() end)
-                            if okF and failed then tag = "FAIL" end
-                            local okC, canc = pcall(function() return pending.job.isCanceled() end)
-                            if okC and canc then tag = "canc" end
-                        end
-                        right = string.format("%s %ds", tag, age)
+                        right = string.format("wait %ds", age)
                     else
                         local cur = state.inStock[item.key] or 0
                         right = string.format("%d/%d", cur, item.level)
