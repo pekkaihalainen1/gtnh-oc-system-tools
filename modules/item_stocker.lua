@@ -30,8 +30,8 @@ local C_ACT   = 0x002244
 
 local HISTORY_MAX  = 30
 local VISIBLE_ROWS = 32
-local CRAFT_TIMEOUT = 900  -- absolute backstop: seconds before assuming a stuck job is dead
-local STALL_WINDOW  = 90   -- seconds without any stock increase before declaring job stalled
+local CRAFT_TIMEOUT = 7200  -- absolute backstop: 2 real hours before declaring dead
+local STALL_WINDOW  = 2400  -- 40 real min (~2 Minecraft days) of no stock movement = stalled
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 
