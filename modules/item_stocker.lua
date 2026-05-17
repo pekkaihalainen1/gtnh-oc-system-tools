@@ -156,6 +156,7 @@ local function addHistory(label, amount, status)
 end
 
 -- Update an existing entry's status in place (e.g., "queued" -> "done").
+-- The original timestamp is preserved so the log keeps request-time order.
 -- Returns true if found, false if the entry was already overwritten by the
 -- ring buffer; in that case the caller should fall back to addHistory.
 local function updateHistoryStatus(id, status)
@@ -164,7 +165,6 @@ local function updateHistoryStatus(id, status)
         local e = state.history[i]
         if e and e.id == id then
             e.status = status
-            e.when   = realTimeStr()
             return true
         end
     end
