@@ -225,34 +225,35 @@ local function refreshPatterns()
 end
 
 -- Returns a completion status string, or nil if still running.
--- Stock-based detection: ignores potentially-lying job objects and watches
--- ME inventory movement. ANY change (up or down) counts as activity, so
--- player consumption during a craft does not trigger a false stall.
+-- Combines job-object status checks (hasFailed/isCanceled/isDone) with
+-- stock-movement detection. Any of: target reached, job reports failure,
+-- or stock frozen for STALL_WINDOW → triggers re-queue on next cycle.
 local function jobStatus(pending, current, level)
     local now = computer.uptime()
 
-    -- Stock reached target → done
     if current >= level then return "done" end
 
-    -- Trust isDone() only when it claims completion (fast-path)
     if pending.job then
-        local ok, done = pcall(function() return pending.job.isDone() end)
-        if ok and done then return "done" end
+        local okD, done = pcall(function() return pending.job.isDone() end)
+        if okD and done then return "done" end
+
+        local okF, failed = pcall(function() return pending.job.hasFailed() end)
+        if okF and failed then return "failed" end
+
+        local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
+        if okC and cancelled then return "cancelled" end
     end
 
-    -- Any stock movement = network is alive; reset stall timer
     pending.lastSeenStock = pending.lastSeenStock or current
     if current ~= pending.lastSeenStock then
         pending.lastSeenStock  = current
         pending.lastProgressAt = now
     end
 
-    -- Stalled: stock frozen for STALL_WINDOW seconds → re-queue
     if now - (pending.lastProgressAt or pending.requestedAt) > STALL_WINDOW then
         return "stalled"
     end
 
-    -- Absolute backstop
     if now - pending.requestedAt > CRAFT_TIMEOUT then return "timeout" end
 
     return nil
@@ -292,15 +293,20 @@ local function checkAndStock()
                 if not craftable then
                     addHistory(entry.label or key, amount, "no pattern")
                 else
+                    -- Try single-arg form first (most compatible); fall back
+                    -- to longer signatures if needed.
                     local ok, job = pcall(function()
-                        return craftable.request(amount, true, nil)
+                        return craftable.request(amount)
                     end)
-                    if not ok then
-                        local ok2, job2 = pcall(function()
-                            return state.me.requestCrafting(
-                                {name=entry.name, damage=entry.damage}, amount)
+                    if not ok or job == nil then
+                        ok, job = pcall(function()
+                            return craftable.request(amount, false)
                         end)
-                        ok, job = ok2, job2
+                    end
+                    if not ok or job == nil then
+                        ok, job = pcall(function()
+                            return craftable.request(amount, true, nil)
+                        end)
                     end
                     if ok then
                         local now = computer.uptime()
@@ -505,7 +511,14 @@ function M.drawUI(gpu, x, y, w, h)
                     local right
                     if pending then
                         local age = math.floor(computer.uptime() - pending.requestedAt)
-                        right = string.format("wait %ds", age)
+                        local tag = "wait"
+                        if pending.job then
+                            local okF, failed = pcall(function() return pending.job.hasFailed() end)
+                            if okF and failed then tag = "FAIL" end
+                            local okC, canc = pcall(function() return pending.job.isCanceled() end)
+                            if okC and canc then tag = "canc" end
+                        end
+                        right = string.format("%s %ds", tag, age)
                     else
                         local cur = state.inStock[item.key] or 0
                         right = string.format("%d/%d", cur, item.level)
