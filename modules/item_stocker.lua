@@ -30,7 +30,8 @@ local C_ACT   = 0x002244
 
 local HISTORY_MAX  = 30
 local VISIBLE_ROWS = 32
-local CRAFT_TIMEOUT = 900  -- seconds before assuming a stuck job is dead
+local CRAFT_TIMEOUT = 900  -- absolute backstop: seconds before assuming a stuck job is dead
+local STALL_WINDOW  = 90   -- seconds without any stock increase before declaring job stalled
 
 -- ── State ─────────────────────────────────────────────────────────────────────
 
@@ -224,17 +225,40 @@ local function refreshPatterns()
 end
 
 -- Returns a completion status string, or nil if still running.
+-- Stock-based detection: ignores potentially-lying job objects and watches
+-- actual ME inventory movement. Mutates `pending` to track progress over time.
 local function jobStatus(pending, current, level)
+    local now = computer.uptime()
+
+    -- Stock reached target → done
     if current >= level then return "done" end
+
+    -- Stock fulfilled what we originally requested → done (target may have moved)
+    if current >= (pending.initialStock or 0) + (pending.amount or 0) then
+        return "done"
+    end
+
+    -- Track stock progress: if it grew since last check, reset stall timer
+    pending.lastObservedStock = pending.lastObservedStock or current
+    if current > pending.lastObservedStock then
+        pending.lastObservedStock = current
+        pending.lastProgressAt    = now
+    end
+
+    -- Fast-path: trust isDone if it claims true (cheap optimization)
     if pending.job then
         local ok, done = pcall(function() return pending.job.isDone() end)
-        if not ok then return "timeout" end  -- job object invalid, give up
-        if done then return "done" end
-        local ok2, cancelled = pcall(function() return pending.job.isCanceled() end)
-        if not ok2 then return "timeout" end  -- job object invalid, give up
-        if cancelled then return "cancelled" end
+        if ok and done then return "done" end
     end
-    if computer.uptime() - pending.requestedAt > CRAFT_TIMEOUT then return "timeout" end
+
+    -- Stalled: no stock progress in STALL_WINDOW seconds
+    if now - (pending.lastProgressAt or pending.requestedAt) > STALL_WINDOW then
+        return "stalled"
+    end
+
+    -- Absolute backstop
+    if now - pending.requestedAt > CRAFT_TIMEOUT then return "timeout" end
+
     return nil
 end
 
@@ -283,10 +307,14 @@ local function checkAndStock()
                         ok, job = ok2, job2
                     end
                     if ok then
+                        local now = computer.uptime()
                         _pendingJobs[key] = {
-                            job         = job,
-                            requestedAt = computer.uptime(),
-                            amount      = amount,
+                            job               = job,
+                            requestedAt       = now,
+                            amount            = amount,
+                            initialStock      = current,
+                            lastObservedStock = current,
+                            lastProgressAt    = now,
                         }
                         addHistory(entry.label or key, amount, "queued")
                     else
@@ -572,7 +600,7 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.fill(x, FOOT_ROW - 1, w, 1, "\xE2\x94\x80")
     gpu.setForeground(C_DIM)
     gpu.set(x + 2, FOOT_ROW,
-        "[Up/Down] Navigate  [Left/Right] Switch panel  [Enter] Edit  [Type] Search  [Esc] Clear  [Home] Refresh patterns  [Q] Quit")
+        "[Up/Down] Navigate  [Left/Right] Switch  [Enter] Edit  [Del] Clear pending  [Type] Search  [Esc] Clear  [Home] Refresh  [Q] Quit")
 
     -- ── Error overlay ─────────────────────────────────────────────────────────
     if state.error then
@@ -642,6 +670,10 @@ function M.handleKey(char, code)
         elseif state.activePanel == "patterns" and state.filteredPats[state.cursorPat] then
             local item = state.filteredPats[state.cursorPat]
             openEditor(item.key, item.label)
+        end
+    elseif code == keyboard.keys.delete then
+        if state.activePanel == "stocked" and state.stockedList[state.cursorStk] then
+            _pendingJobs[state.stockedList[state.cursorStk].key] = nil
         end
     elseif code == keyboard.keys.escape then
         if state.searchStr ~= "" then
