@@ -137,8 +137,14 @@ local function realTimeStr()
     return string.format("%02d:%02d:%02d", math.floor(t / 3600) % 24, math.floor(t / 60) % 60, t % 60)
 end
 
+local _historySeq = 0
+
+-- Add a fresh entry to the ring buffer. Returns the entry id so the caller
+-- can later update the same row in place (see updateHistoryStatus).
 local function addHistory(label, amount, status)
+    _historySeq = _historySeq + 1
     state.history[state.histHead] = {
+        id     = _historySeq,
         label  = unicode.sub(tostring(label), 1, 20),
         amount = amount,
         status = status,
@@ -146,6 +152,23 @@ local function addHistory(label, amount, status)
     }
     state.histHead  = (state.histHead % HISTORY_MAX) + 1
     state.histCount = math.min(state.histCount + 1, HISTORY_MAX)
+    return _historySeq
+end
+
+-- Update an existing entry's status in place (e.g., "queued" -> "done").
+-- Returns true if found, false if the entry was already overwritten by the
+-- ring buffer; in that case the caller should fall back to addHistory.
+local function updateHistoryStatus(id, status)
+    if not id then return false end
+    for i = 1, HISTORY_MAX do
+        local e = state.history[i]
+        if e and e.id == id then
+            e.status = status
+            e.when   = realTimeStr()
+            return true
+        end
+    end
+    return false
 end
 
 local function getHistoryOrdered()
@@ -277,9 +300,15 @@ local function processItem(key, entry, current)
 
     -- Resolve pending job if there is one
     if _pendingJobs[key] then
-        local s = jobStatus(_pendingJobs[key], current, entry.level)
+        local pending = _pendingJobs[key]
+        local s = jobStatus(pending, current, entry.level)
         if s then
-            addHistory(entry.label or key, _pendingJobs[key].amount, s)
+            -- Update the existing "queued" row in place so a single line
+            -- transitions queued -> done/stalled/timeout. Fall back to
+            -- a new entry if the original row was overwritten by the ring.
+            if not updateHistoryStatus(pending.historyId, s) then
+                addHistory(entry.label or key, pending.amount, s)
+            end
             _pendingJobs[key] = nil
             -- A stall/timeout may indicate a stale craftable reference.
             -- Refresh patterns so the next request uses a fresh object.
@@ -321,14 +350,15 @@ local function processItem(key, entry, current)
 
     if ok and job ~= nil then
         local now = computer.uptime()
+        local hid = addHistory(entry.label or key, amount, "queued")
         _pendingJobs[key] = {
             job            = job,
             requestedAt    = now,
             amount         = amount,
             lastSeenStock  = current,
             lastProgressAt = now,
+            historyId      = hid,
         }
-        addHistory(entry.label or key, amount, "queued")
     else
         addHistory(entry.label or key, amount, "err")
     end
