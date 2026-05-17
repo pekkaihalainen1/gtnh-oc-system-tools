@@ -226,32 +226,28 @@ end
 
 -- Returns a completion status string, or nil if still running.
 -- Stock-based detection: ignores potentially-lying job objects and watches
--- actual ME inventory movement. Mutates `pending` to track progress over time.
+-- ME inventory movement. ANY change (up or down) counts as activity, so
+-- player consumption during a craft does not trigger a false stall.
 local function jobStatus(pending, current, level)
     local now = computer.uptime()
 
     -- Stock reached target → done
     if current >= level then return "done" end
 
-    -- Stock fulfilled what we originally requested → done (target may have moved)
-    if current >= (pending.initialStock or 0) + (pending.amount or 0) then
-        return "done"
-    end
-
-    -- Track stock progress: if it grew since last check, reset stall timer
-    pending.lastObservedStock = pending.lastObservedStock or current
-    if current > pending.lastObservedStock then
-        pending.lastObservedStock = current
-        pending.lastProgressAt    = now
-    end
-
-    -- Fast-path: trust isDone if it claims true (cheap optimization)
+    -- Trust isDone() only when it claims completion (fast-path)
     if pending.job then
         local ok, done = pcall(function() return pending.job.isDone() end)
         if ok and done then return "done" end
     end
 
-    -- Stalled: no stock progress in STALL_WINDOW seconds
+    -- Any stock movement = network is alive; reset stall timer
+    pending.lastSeenStock = pending.lastSeenStock or current
+    if current ~= pending.lastSeenStock then
+        pending.lastSeenStock  = current
+        pending.lastProgressAt = now
+    end
+
+    -- Stalled: stock frozen for STALL_WINDOW seconds → re-queue
     if now - (pending.lastProgressAt or pending.requestedAt) > STALL_WINDOW then
         return "stalled"
     end
@@ -309,12 +305,11 @@ local function checkAndStock()
                     if ok then
                         local now = computer.uptime()
                         _pendingJobs[key] = {
-                            job               = job,
-                            requestedAt       = now,
-                            amount            = amount,
-                            initialStock      = current,
-                            lastObservedStock = current,
-                            lastProgressAt    = now,
+                            job            = job,
+                            requestedAt    = now,
+                            amount         = amount,
+                            lastSeenStock  = current,
+                            lastProgressAt = now,
                         }
                         addHistory(entry.label or key, amount, "queued")
                     else
