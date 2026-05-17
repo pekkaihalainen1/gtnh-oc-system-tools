@@ -114,6 +114,12 @@ function M.getHistory()
     return getHistoryOrdered()
 end
 
+function M.getNextCheckIn()
+    if not state.me then return nil end
+    local remaining = (state.lastCheck + M.config.checkInterval) - computer.uptime()
+    return math.max(0, math.floor(remaining))
+end
+
 local function rebuildStockedList()
     state.stockedList = {}
     for key, entry in pairs(M.config.stockList) do

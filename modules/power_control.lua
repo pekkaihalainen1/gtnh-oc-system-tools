@@ -310,9 +310,18 @@ function M.drawUI(gpu, x, y, w, h)
     end
 
     -- ── Footer hint ───────────────────────────────────────────────────────────
+    local nextIn = (_stocker and _stocker.getNextCheckIn) and _stocker.getNextCheckIn() or nil
+    local stockStr
+    if nextIn == nil then
+        stockStr = "Stock: no ME"
+    elseif nextIn == 0 then
+        stockStr = "Stock: checking..."
+    else
+        stockStr = string.format("Stock: %ds", nextIn)
+    end
     gpu.setForeground(C_DIM)
     gpu.set(cx, y + h - 1,
-        string.format("Interval: %ds     [Q] Quit     [Tab] Switch", cfg.checkInterval))
+        string.format("Interval: %ds  %s     [Q] Quit     [Tab] Switch", cfg.checkInterval, stockStr))
 
     -- ── Error overlay ─────────────────────────────────────────────────────────
     if state.error then
