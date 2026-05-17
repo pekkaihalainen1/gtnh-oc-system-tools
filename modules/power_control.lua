@@ -301,9 +301,9 @@ function M.drawUI(gpu, x, y, w, h)
         gpu.set(cx, r, e.when)
         gpu.setForeground(C_VALUE)
         gpu.set(cx + 9, r, unicode.sub(e.label, 1, labelW))
-        local statusColor = (e.status == "done") and C_POS
-                         or (e.status == "queued") and C_LABEL
-                         or C_NEG
+        local statusColor = (e.status == "done")   and 0x44CC44   -- green
+                         or (e.status == "queued") and 0xBBAA22   -- dull yellow
+                         or 0xBB3333                              -- dull red (err/stalled/timeout)
         gpu.setForeground(statusColor)
         local right = string.format("%5dx %-7s", e.amount, e.status:sub(1, 7))
         gpu.set(x + w - 1 - rightW, r, right)
