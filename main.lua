@@ -11,6 +11,7 @@ local ui        = require("lib/ui")
 
 -- ── Module registry (add new modules here) ───────────────────────────────────
 local MODULES = {
+    require("modules/dashboard"),
     require("modules/power_control"),
     require("modules/item_stocker"),
 }

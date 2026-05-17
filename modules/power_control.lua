@@ -1,10 +1,10 @@
 -- Power control module for Lapotronic Supercapacitor
 -- Redstone ON when energy > highThreshold, OFF when energy < lowThreshold
+-- UI is a small config editor; the dashboard module owns the overview view.
 local component = require("component")
 local computer  = require("computer")
 local os        = require("os")
-local unicode   = require("unicode")
-local ui        = require("lib/ui")
+local keyboard  = require("keyboard")
 
 local M = {}
 M.id   = "power_control"
@@ -21,7 +21,7 @@ local state = {
     energyPercent  = 0,
     euStored       = 0,
     euCapacity     = 0,
-    euNet          = 0,   -- EU/t net (positive = charging, negative = draining)
+    euNet          = 0,
     redstoneActive = false,
     lastUpdate     = "--:--:--",
     error          = nil,
@@ -30,28 +30,18 @@ local state = {
 local _redstoneIO  = nil
 local _detector    = nil
 local _lastCheck   = 0
-local _prevStored  = nil   -- for delta-based net flow
+local _prevStored  = nil
 local _prevTime    = nil
-local _stocker     = nil   -- lazy ref to item_stocker for crafting history
-
-local function getCraftingHistory()
-    if not _stocker then
-        local ok, m = pcall(require, "modules/item_stocker")
-        if ok and m then _stocker = m end
-    end
-    return (_stocker and _stocker.getHistory) and _stocker.getHistory() or {}
-end
 
 -- ── Colors ────────────────────────────────────────────────────────────────────
 
-local C_TITLE  = 0xFF00FF   -- magenta: accent only
-local C_LABEL  = 0x00A6FF   -- primary text
-local C_VALUE  = 0x00A6FF   -- values
-local C_DIM    = 0x004477   -- secondary/dim text
-local C_PANEL  = 0x001111   -- near-black: empty bar background
-local C_POS    = 0x00A6FF   -- positive flow (charging)
-local C_NEG    = 0xFF00FF   -- magenta: negative flow (draining)
-local C_SEP    = 0x003355   -- separator lines
+local C_TITLE  = 0xFF00FF
+local C_LABEL  = 0x00A6FF
+local C_VALUE  = 0x00A6FF
+local C_DIM    = 0x004477
+local C_SEP    = 0x003355
+local C_ACT    = 0x002244
+local C_NEG    = 0xFF00FF
 
 -- ── Component helpers ─────────────────────────────────────────────────────────
 
@@ -70,6 +60,74 @@ local function setRedstone(active)
     if not _redstoneIO then return end
     _redstoneIO.setOutput(M.config.redstoneSide, active and 15 or 0)
     state.redstoneActive = active
+end
+
+-- ── Config editor state ───────────────────────────────────────────────────────
+
+local SIDE_NAMES = { [0]="bottom", [1]="top", [2]="north", [3]="south", [4]="west", [5]="east" }
+
+local editor = {
+    mode  = false,
+    field = "low",   -- "low" | "high" | "side"
+    buf   = "",
+    drafts = { low = "20", high = "90", side = "1" },
+}
+
+local function saveMyConfig()
+    local cfg = require("lib/config")
+    local full = cfg.load("config.cfg", {})
+    full[M.id] = M.config
+    cfg.save("config.cfg", full)
+end
+
+local function commitEditorAndSave()
+    local d = editor.drafts
+    local low  = math.max(0, math.min(100, tonumber(d.low)  or 20))
+    local high = math.max(0, math.min(100, tonumber(d.high) or 90))
+    local side = math.max(0, math.min(5,   math.floor(tonumber(d.side) or 1)))
+
+    if high <= low then high = math.min(100, low + 5) end
+
+    M.config.lowThreshold  = low  / 100
+    M.config.highThreshold = high / 100
+    M.config.redstoneSide  = side
+
+    pcall(saveMyConfig)
+    -- Apply new side immediately by clearing the old side and re-driving.
+    if _redstoneIO then
+        pcall(function() _redstoneIO.setOutput(side, state.redstoneActive and 15 or 0) end)
+    end
+end
+
+local function openEditor()
+    editor.mode  = true
+    editor.field = "low"
+    editor.drafts.low  = tostring(math.floor((M.config.lowThreshold  or 0) * 100 + 0.5))
+    editor.drafts.high = tostring(math.floor((M.config.highThreshold or 0) * 100 + 0.5))
+    editor.drafts.side = tostring(M.config.redstoneSide or 1)
+    editor.buf   = editor.drafts.low
+end
+
+local function closeEditor(save)
+    if save then
+        editor.drafts[editor.field] = editor.buf
+        commitEditorAndSave()
+    end
+    editor.mode = false
+    editor.buf  = ""
+end
+
+local function advanceField()
+    editor.drafts[editor.field] = editor.buf
+    if editor.field == "low" then
+        editor.field = "high"
+        editor.buf   = editor.drafts.high
+    elseif editor.field == "high" then
+        editor.field = "side"
+        editor.buf   = editor.drafts.side
+    else
+        closeEditor(true)
+    end
 end
 
 -- ── Module API ────────────────────────────────────────────────────────────────
@@ -119,7 +177,6 @@ function M.update()
         state.lastUpdate = os.date("%H:%M:%S")
         state.error      = nil
 
-        -- Net flow: delta EU between checks, converted to EU/t (20t/s)
         if _prevStored ~= nil and _prevTime ~= nil then
             local dt = now - _prevTime
             if dt > 0 then
@@ -129,7 +186,6 @@ function M.update()
         _prevStored = stored
         _prevTime   = now
 
-        -- Hysteresis control
         local pct = state.energyPercent
         if not state.redstoneActive and pct >= M.config.highThreshold then
             setRedstone(true)
@@ -162,168 +218,100 @@ end
 -- ── drawUI ────────────────────────────────────────────────────────────────────
 
 function M.drawUI(gpu, x, y, w, h)
-    local cfg    = M.config
-    local pct    = state.energyPercent
-    local color  = ui.getEnergyColor(pct, cfg.lowThreshold, cfg.highThreshold)
-
-    -- Time estimates from net flow
-    local netPerSec   = state.euNet * 20
-    local timeToFull  = (netPerSec >  1) and (state.euCapacity - state.euStored) / netPerSec  or nil
-    local timeToEmpty = (netPerSec < -1) and  state.euStored                     / (-netPerSec) or nil
-
-    -- Clear
     gpu.setBackground(0x000000)
     gpu.fill(x, y, w, h, " ")
 
-    local cx = x + 2   -- content left margin
-    local row = y      -- current row cursor
+    local cx  = x + 2
+    local row = y + 1
 
-    -- ── Title ────────────────────────────────────────────────────────────────
-    row = row + 1
+    -- Title row
     gpu.setForeground(C_TITLE)
-    gpu.set(cx, row, "LAPOTRONIC SUPERCAPACITOR")
+    gpu.set(cx, row, "POWER CONTROL CONFIG")
     gpu.setForeground(C_DIM)
     gpu.set(x + w - 1 - #state.lastUpdate, row, state.lastUpdate)
-    -- thin separator after title
     gpu.setForeground(C_SEP)
-    local sepStart = cx + 26
+    local sepStart = cx + 22
     local sepEnd   = x + w - 2 - #state.lastUpdate - 1
     if sepEnd > sepStart then
         gpu.fill(sepStart, row, sepEnd - sepStart, 1, "─")
     end
 
-    -- ── Energy bar (5 rows thick, 10-char margin each side) ──────────────────
-    local MARGIN  = 10
-    row = row + 2
-    local barX    = x + MARGIN
-    local barW    = w - MARGIN * 2
-    local barH    = 5
-    local filled  = math.floor(barW * math.max(0, math.min(1, pct)))
-    local midRow  = row + math.floor(barH / 2)
-
-    for r = row, row + barH - 1 do
-        if filled > 0 then
-            gpu.setBackground(color)
-            gpu.fill(barX, r, filled, 1, " ")
-        end
-        if filled < barW then
-            gpu.setBackground(C_PANEL)
-            gpu.fill(barX + filled, r, barW - filled, 1, " ")
-        end
-    end
-    -- Percentage centered in middle row of bar
-    gpu.setBackground(color)
-    gpu.setForeground(0x000000)
-    local pctStr = string.format("%.1f%%", pct * 100)
-    local pctX   = barX + math.floor((barW - #pctStr) / 2)
-    gpu.set(pctX, midRow, pctStr)
-    gpu.setBackground(0x000000)
-
-    -- Threshold tick marks below bar
-    row = row + barH
-    gpu.setForeground(C_NEG)
-    local lowX = barX + math.floor(barW * cfg.lowThreshold)
-    gpu.set(lowX, row, string.format("%.0f%%", cfg.lowThreshold * 100))
-    gpu.setForeground(C_POS)
-    local highX = barX + math.floor(barW * cfg.highThreshold) - 3
-    gpu.set(highX, row, string.format("%.0f%%", cfg.highThreshold * 100))
-
-    -- ── Data rows ─────────────────────────────────────────────────────────────
     row = row + 2
 
-    local function label(r, lbl, val, vc)
-        gpu.setForeground(C_LABEL)
+    -- Helper: draw one labeled value row.
+    local function drawField(r, lbl, value, suffix, isActive)
         gpu.setBackground(0x000000)
+        gpu.setForeground(C_LABEL)
         gpu.set(cx, r, lbl)
-        gpu.setForeground(vc or C_VALUE)
-        gpu.set(cx + 11, r, val)
+        local vx = cx + 18
+        if isActive then
+            gpu.setBackground(C_ACT)
+            gpu.setForeground(C_VALUE)
+            local txt = string.format(" %s_ ", value)
+            gpu.set(vx, r, txt .. string.rep(" ", math.max(0, 8 - #txt)))
+        else
+            gpu.setBackground(0x000000)
+            gpu.setForeground(editor.mode and C_DIM or C_VALUE)
+            gpu.set(vx, r, string.format(" %s ", value) .. string.rep(" ", 6))
+        end
+        gpu.setBackground(0x000000)
+        gpu.setForeground(C_DIM)
+        if suffix then
+            gpu.set(vx + 10, r, suffix)
+        end
     end
 
-    label(row, "STORED    ",
-        ui.formatEU(state.euStored) .. "  /  " .. ui.formatEU(state.euCapacity))
+    local lowVal  = editor.mode and (editor.field == "low"  and editor.buf or editor.drafts.low)
+                                 or tostring(math.floor(M.config.lowThreshold  * 100 + 0.5))
+    local highVal = editor.mode and (editor.field == "high" and editor.buf or editor.drafts.high)
+                                 or tostring(math.floor(M.config.highThreshold * 100 + 0.5))
+    local sideVal = editor.mode and (editor.field == "side" and editor.buf or editor.drafts.side)
+                                 or tostring(M.config.redstoneSide)
+
+    drawField(row, "LOW THRESHOLD   :", lowVal,
+        "%   (redstone OFF below)", editor.mode and editor.field == "low")
     row = row + 2
 
-    local netColor = state.euNet >= 0 and C_POS or C_NEG
-    label(row, "NET FLOW  ", string.format("%+.0f EU/t", state.euNet), netColor)
-    row = row + 1
+    drawField(row, "HIGH THRESHOLD  :", highVal,
+        "%   (redstone ON above)", editor.mode and editor.field == "high")
+    row = row + 2
 
-    local col2 = cx + 30
-    label(row, "FULL IN   ", ui.formatTime(timeToFull))
+    local sideNum  = tonumber(sideVal) or -1
+    local sideName = SIDE_NAMES[sideNum] or "?"
+    drawField(row, "REDSTONE SIDE   :", sideVal,
+        string.format("(%s)   0=bot 1=top 2=N 3=S 4=W 5=E", sideName),
+        editor.mode and editor.field == "side")
+    row = row + 2
+
+    -- Read-only check interval
     gpu.setForeground(C_LABEL)
-    gpu.set(col2, row, "EMPTY IN  ")
-    gpu.setForeground(C_VALUE)
-    gpu.set(col2 + 10, row, ui.formatTime(timeToEmpty))
+    gpu.set(cx, row, "CHECK INTERVAL  :")
+    gpu.setForeground(C_DIM)
+    gpu.set(cx + 18, row, string.format(" %ds  (read-only)", M.config.checkInterval))
+    row = row + 3
 
-    -- ── Separator ─────────────────────────────────────────────────────────────
-    row = row + 2
+    -- Hint / footer
     gpu.setForeground(C_SEP)
     gpu.fill(cx, row, w - 4, 1, "─")
+    row = row + 1
 
-    -- ── Redstone section ──────────────────────────────────────────────────────
-    row = row + 2
-    gpu.setForeground(C_LABEL)
-    gpu.set(cx, row, "REDSTONE  ")
-    local badgeBg  = state.redstoneActive and 0xAA0000 or 0x222233
-    local badgeTxt = state.redstoneActive and " ACTIVE " or "INACTIVE"
-    gpu.setForeground(C_VALUE)
-    gpu.setBackground(badgeBg)
-    gpu.set(cx + 10, row, " " .. badgeTxt .. " ")
-    gpu.setBackground(0x000000)
     gpu.setForeground(C_DIM)
-    gpu.set(cx + 22, row, string.format(
-        "ON >%.0f%%  ·  OFF <%.0f%%  ·  Side: %d",
-        cfg.highThreshold * 100, cfg.lowThreshold * 100, cfg.redstoneSide))
-
-    -- ── Crafting History ──────────────────────────────────────────────────────
-    row = row + 2
-    gpu.setForeground(C_TITLE)
-    gpu.set(cx, row, "CRAFTING HISTORY")
-    gpu.setForeground(C_SEP)
-    local hsepStart = cx + 17
-    local hsepEnd   = x + w - 2
-    if hsepEnd > hsepStart then
-        gpu.fill(hsepStart, row, hsepEnd - hsepStart, 1, "─")
-    end
-
-    local hist      = getCraftingHistory()
-    local histStart = row + 2
-    local histEnd   = y + h - 3   -- leave room for footer + error
-    local maxRows   = math.max(0, histEnd - histStart + 1)
-    local startIdx  = math.max(1, #hist - maxRows + 1)
-    local rightW    = 16  -- "%5dx %-7s" + 1 margin
-    local labelW    = w - 4 - 9 - rightW - 1
-
-    for i = startIdx, #hist do
-        local e = hist[i]
-        local r = histStart + (i - startIdx)
-        if r > histEnd then break end
-        gpu.setForeground(C_DIM)
-        gpu.set(cx, r, e.when)
-        gpu.setForeground(C_VALUE)
-        gpu.set(cx + 9, r, unicode.sub(e.label, 1, labelW))
-        local statusColor = (e.status == "done")   and 0x44CC44   -- green
-                         or (e.status == "queued") and 0xBBAA22   -- dull yellow
-                         or 0xBB3333                              -- dull red (err/stalled/timeout)
-        gpu.setForeground(statusColor)
-        local right = string.format("%5dx %-7s", e.amount, e.status:sub(1, 7))
-        gpu.set(x + w - 1 - rightW, r, right)
-    end
-
-    -- ── Footer hint ───────────────────────────────────────────────────────────
-    local nextIn = (_stocker and _stocker.getNextCheckIn) and _stocker.getNextCheckIn() or nil
-    local stockStr
-    if nextIn == nil then
-        stockStr = "Stock: no ME"
-    elseif nextIn == 0 then
-        stockStr = "Stock: checking..."
+    if editor.mode then
+        local fieldLabel = ({low = "LOW THRESHOLD", high = "HIGH THRESHOLD", side = "REDSTONE SIDE"})[editor.field]
+        gpu.set(cx, row, string.format("Editing: %s", fieldLabel))
+        row = row + 2
+        gpu.set(cx, row, "[0-9] Type  [Backspace] Erase  [Enter] Next/Save  [Esc] Cancel")
     else
-        stockStr = string.format("Stock: %ds", nextIn)
+        gpu.set(cx, row, "Press [Enter] to edit thresholds and redstone side")
+        row = row + 2
+        gpu.set(cx, row, "Settings persist to config.cfg")
     end
-    gpu.setForeground(C_DIM)
-    gpu.set(cx, y + h - 1,
-        string.format("Interval: %ds  %s     [Q] Quit     [Tab] Switch", cfg.checkInterval, stockStr))
 
-    -- ── Error overlay ─────────────────────────────────────────────────────────
+    -- Footer
+    gpu.setForeground(C_DIM)
+    gpu.set(cx, y + h - 1, "[Q] Quit     [Tab] Switch tab")
+
+    -- Error overlay
     if state.error then
         gpu.setForeground(C_NEG)
         gpu.set(cx, y + h - 2, ("ERR: " .. state.error):sub(1, w - 4))
@@ -333,6 +321,28 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.setBackground(0x000000)
 end
 
-function M.handleKey(char, code) end
+-- ── handleKey ────────────────────────────────────────────────────────────────
+
+function M.handleKey(char, code)
+    if not editor.mode then
+        if code == keyboard.keys.enter then
+            openEditor()
+        end
+        return
+    end
+
+    -- Edit mode
+    if char >= 48 and char <= 57 then  -- digits 0-9
+        if #editor.buf < 4 then
+            editor.buf = editor.buf .. string.char(char)
+        end
+    elseif code == keyboard.keys.back then
+        editor.buf = editor.buf:sub(1, -2)
+    elseif code == keyboard.keys.enter then
+        advanceField()
+    elseif code == keyboard.keys.escape then
+        closeEditor(false)
+    end
+end
 
 return M

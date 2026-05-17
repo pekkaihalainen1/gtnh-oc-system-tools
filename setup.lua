@@ -12,6 +12,7 @@ local FILES = {
     "main.lua",
     "lib/config.lua",
     "lib/ui.lua",
+    "modules/dashboard.lua",
     "modules/power_control.lua",
     "modules/item_stocker.lua",
 }
