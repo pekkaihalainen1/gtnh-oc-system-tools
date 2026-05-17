@@ -59,6 +59,7 @@ local state = {
     screenW      = 0,
     screenH      = 0,
     error        = nil,
+    inStock      = {},  -- itemKey -> current count, updated each check cycle
 }
 
 local _patsByKey    = {}  -- itemKey -> craftable object cache
@@ -227,9 +228,11 @@ local function jobStatus(pending, current, level)
     if current >= level then return "done" end
     if pending.job then
         local ok, done = pcall(function() return pending.job.isDone() end)
-        if ok and done then return "done" end
+        if not ok then return "timeout" end  -- job object invalid, give up
+        if done then return "done" end
         local ok2, cancelled = pcall(function() return pending.job.isCanceled() end)
-        if ok2 and cancelled then return "cancelled" end
+        if not ok2 then return "timeout" end  -- job object invalid, give up
+        if cancelled then return "cancelled" end
     end
     if computer.uptime() - pending.requestedAt > CRAFT_TIMEOUT then return "timeout" end
     return nil
@@ -243,6 +246,7 @@ local function checkAndStock()
             inStock[itemKey(item.name, item.damage)] = item.size or 0
         end
     end
+    state.inStock = inStock
 
     for key, entry in pairs(M.config.stockList) do
         if entry.level and entry.level > 0 then
@@ -473,12 +477,20 @@ function M.drawUI(gpu, x, y, w, h)
                     gpu.fill(px, r, pw, 1, " ")
                 end
                 if panel == "stocked" then
-                    local marker = isCursor and "\xE2\x96\xB6 " or "  "  -- "▶ "
-                    local right  = string.format("%5d/%d", item.level, item.perCycle)
-                    local lw     = pw - #marker - #right - 1
-                    local lbl    = unicode.sub(item.label, 1, lw)
-                    local line   = marker .. lbl .. string.rep(" ", lw - unicode.len(lbl)) .. " " .. right
-                    gpu.setForeground(isCursor and C_LABEL or C_VALUE)
+                    local marker  = isCursor and "\xE2\x96\xB6 " or "  "  -- "▶ "
+                    local pending = _pendingJobs[item.key]
+                    local right
+                    if pending then
+                        local age = math.floor(computer.uptime() - pending.requestedAt)
+                        right = string.format("wait %ds", age)
+                    else
+                        local cur = state.inStock[item.key] or 0
+                        right = string.format("%d/%d", cur, item.level)
+                    end
+                    local lw   = pw - #marker - #right - 1
+                    local lbl  = unicode.sub(item.label, 1, lw)
+                    local line = marker .. lbl .. string.rep(" ", lw - unicode.len(lbl)) .. " " .. right
+                    gpu.setForeground(pending and C_NEG or (isCursor and C_LABEL or C_VALUE))
                     gpu.set(px, r, line:sub(1, pw))
                 else
                     -- patterns panel
