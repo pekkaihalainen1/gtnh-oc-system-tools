@@ -1,8 +1,9 @@
 -- Dashboard module: read-only overview of power state and crafting history.
 -- Has no logic of its own; pulls data from power_control and item_stocker
 -- via their public accessors.
-local unicode = require("unicode")
-local ui      = require("lib/ui")
+local unicode  = require("unicode")
+local keyboard = require("keyboard")
+local ui       = require("lib/ui")
 
 local M = {}
 M.id     = "dashboard"
@@ -50,7 +51,14 @@ end
 function M.start() end
 function M.update() end
 function M.stop() end
-function M.handleKey(char, code) end
+function M.handleKey(char, code)
+    if code == keyboard.keys.delete then
+        local stocker = getStocker()
+        if stocker and stocker.clearHistory then
+            stocker.clearHistory()
+        end
+    end
+end
 
 -- ── drawUI ───────────────────────────────────────────────────────────────────
 
@@ -226,7 +234,7 @@ function M.drawUI(gpu, x, y, w, h)
     end
     gpu.setForeground(C_DIM)
     gpu.set(cx, y + h - 1,
-        string.format("Interval: %ds  %s     [Q] Quit     [Tab] Switch", cfg.checkInterval, stockStr))
+        string.format("Interval: %ds  %s     [Del] Clear history  [Q] Quit  [Tab] Switch", cfg.checkInterval, stockStr))
 
     -- ── Error overlay ────────────────────────────────────────────────────────
     if status.error then

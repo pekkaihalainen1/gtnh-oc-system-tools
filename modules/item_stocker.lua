@@ -187,6 +187,17 @@ function M.getHistory()
     return getHistoryOrdered()
 end
 
+function M.clearHistory()
+    state.history  = {}
+    state.histHead = 1
+    state.histCount = 0
+    -- Detach in-flight jobs from now-deleted history rows; resolution
+    -- will fall through to addHistory and log a fresh entry.
+    for _, pending in pairs(_pendingJobs) do
+        pending.historyId = nil
+    end
+end
+
 function M.getNextCheckIn()
     if not state.me then return nil end
     local remaining = (state.lastCheck + M.config.checkInterval) - computer.uptime()
