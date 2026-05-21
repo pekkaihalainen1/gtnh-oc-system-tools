@@ -68,6 +68,9 @@ local _pendingJobs  = {}  -- itemKey -> {job, requestedAt, amount}
                           -- cleared when job finishes, cancels, or times out
 local _epochOffset  = nil -- realUnixTime - computer.uptime() after NTP sync
 
+local PATTERN_REFRESH_THROTTLE = 60  -- seconds between automatic pattern refreshes
+local _lastPatternRefresh = -math.huge
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
 local _cfg = require("lib/config")
@@ -261,7 +264,7 @@ local function refreshPatterns()
             local label, name, damage = extractItemInfo(c)
             if label then
                 local k = itemKey(name or "unknown", damage or 0)
-                newPats[#newPats + 1] = { key = k, label = tostring(label), craftable = c }
+                newPats[#newPats + 1] = { key = k, label = tostring(label) }
                 newByKey[k] = c
             end
         end
@@ -269,7 +272,19 @@ local function refreshPatterns()
     table.sort(newPats, function(a, b) return a.label:lower() < b.label:lower() end)
     state.patterns = newPats
     _patsByKey     = newByKey
+    _lastPatternRefresh = computer.uptime()
     rebuildFilteredPatterns()
+    -- Free the old craftable userdata refs and any transient garbage
+    collectgarbage("collect")
+end
+
+-- Throttled variant for automatic recovery paths (stall/timeout).
+-- Avoids burning memory rebuilding the entire pattern cache every cycle
+-- when many items stall back-to-back. Home key still uses refreshPatterns
+-- directly to bypass the throttle.
+local function refreshPatternsThrottled()
+    if computer.uptime() - _lastPatternRefresh < PATTERN_REFRESH_THROTTLE then return end
+    pcall(refreshPatterns)
 end
 
 -- Returns a completion status string, or nil if still running.
@@ -323,8 +338,9 @@ local function processItem(key, entry, current)
             _pendingJobs[key] = nil
             -- A stall/timeout may indicate a stale craftable reference.
             -- Refresh patterns so the next request uses a fresh object.
+            -- Throttled so back-to-back stalls do not thrash memory.
             if s == "stalled" or s == "timeout" then
-                pcall(refreshPatterns)
+                refreshPatternsThrottled()
             end
         else
             return  -- still running, leave it alone
@@ -376,13 +392,23 @@ local function processItem(key, entry, current)
 end
 
 local function checkAndStock()
+    -- Only keep counts for items we actually care about. The ME network
+    -- can contain thousands of unique items; storing them all would balloon
+    -- memory every cycle. Build a set of keys first, then filter the scan.
+    local wanted = {}
+    for key, _ in pairs(M.config.stockList) do wanted[key] = true end
+
     local inStock = {}
     local items = state.me.getItemsInNetwork() or {}
     for _, item in pairs(items) do
         if type(item) == "table" and item.name then
-            inStock[itemKey(item.name, item.damage)] = item.size or 0
+            local k = itemKey(item.name, item.damage)
+            if wanted[k] then
+                inStock[k] = item.size or 0
+            end
         end
     end
+    items = nil  -- help GC release the (potentially huge) network snapshot
     state.inStock = inStock
 
     -- Isolate each item: a thrown error processing one must not prevent
@@ -395,6 +421,9 @@ local function checkAndStock()
             _pendingJobs[key] = nil  -- prevent permanent block on a bad job
         end
     end
+
+    -- Reclaim per-cycle garbage (network snapshot, transient closures, etc.)
+    collectgarbage("collect")
 end
 
 -- ── Editor helpers ────────────────────────────────────────────────────────────

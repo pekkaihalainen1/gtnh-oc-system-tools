@@ -232,9 +232,16 @@ function M.drawUI(gpu, x, y, w, h)
     else
         stockStr = string.format("Stock: %ds", nextIn)
     end
+    -- Memory indicator: free / total KB. Helpful when diagnosing OOM.
+    local computer = require("computer")
+    local memFree  = math.floor(computer.freeMemory() / 1024)
+    local memTotal = math.floor(computer.totalMemory() / 1024)
+    local memStr   = string.format("Mem: %d/%d KB", memFree, memTotal)
+
     gpu.setForeground(C_DIM)
     gpu.set(cx, y + h - 1,
-        string.format("Interval: %ds  %s     [Del] Clear history  [Q] Quit  [Tab] Switch", cfg.checkInterval, stockStr))
+        string.format("Interval: %ds  %s  %s  [Del] Clear  [Q] Quit  [Tab] Switch",
+            cfg.checkInterval, stockStr, memStr))
 
     -- ── Error overlay ────────────────────────────────────────────────────────
     if status.error then
