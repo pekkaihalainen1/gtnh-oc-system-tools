@@ -3,6 +3,7 @@
 -- via their public accessors.
 local unicode  = require("unicode")
 local keyboard = require("keyboard")
+local computer = require("computer")
 local ui       = require("lib/ui")
 
 local M = {}
@@ -233,7 +234,6 @@ function M.drawUI(gpu, x, y, w, h)
         stockStr = string.format("Stock: %ds", nextIn)
     end
     -- Memory indicator: free / total KB. Helpful when diagnosing OOM.
-    local computer = require("computer")
     local memFree  = math.floor(computer.freeMemory() / 1024)
     local memTotal = math.floor(computer.totalMemory() / 1024)
     local memStr   = string.format("Mem: %d/%d KB", memFree, memTotal)

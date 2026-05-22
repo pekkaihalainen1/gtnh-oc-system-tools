@@ -71,6 +71,11 @@ local _epochOffset  = nil -- realUnixTime - computer.uptime() after NTP sync
 local PATTERN_REFRESH_THROTTLE = 60  -- seconds between automatic pattern refreshes
 local _lastPatternRefresh = -math.huge
 
+-- Set to true after we confirm the ME interface accepts a filter table on
+-- getItemsInNetwork. Targeted queries avoid the multi-MB full-network
+-- snapshot that bulk scans produce on large GTNH bases.
+local _useFilteredScan = nil  -- nil = unprobed, true = supported, false = bulk fallback
+
 -- ── Helpers ───────────────────────────────────────────────────────────────────
 
 local _cfg = require("lib/config")
@@ -392,23 +397,57 @@ local function processItem(key, entry, current)
 end
 
 local function checkAndStock()
-    -- Only keep counts for items we actually care about. The ME network
-    -- can contain thousands of unique items; storing them all would balloon
-    -- memory every cycle. Build a set of keys first, then filter the scan.
-    local wanted = {}
-    for key, _ in pairs(M.config.stockList) do wanted[key] = true end
-
+    -- Build current stock counts. We MUST avoid a bulk getItemsInNetwork()
+    -- call on large bases — that materializes a snapshot of every item in
+    -- the network (often >1 MB) which spikes the OC Lua heap on every cycle.
+    -- Prefer per-item filtered queries; fall back to one bulk scan only if
+    -- the API rejects the filter table.
     local inStock = {}
-    local items = state.me.getItemsInNetwork() or {}
-    for _, item in pairs(items) do
-        if type(item) == "table" and item.name then
-            local k = itemKey(item.name, item.damage)
-            if wanted[k] then
-                inStock[k] = item.size or 0
+
+    if _useFilteredScan ~= false then
+        local allOk = true
+        for key, _ in pairs(M.config.stockList) do
+            local name, damage = parseKey(key)
+            local ok, result = pcall(function()
+                return state.me.getItemsInNetwork({name = name, damage = damage})
+            end)
+            if not ok or type(result) ~= "table" then
+                allOk = false
+                break
             end
+            local total = 0
+            for _, item in pairs(result) do
+                if type(item) == "table" and item.name == name then
+                    total = total + (item.size or 0)
+                end
+            end
+            inStock[key] = total
+            result = nil
+        end
+        if allOk then
+            _useFilteredScan = true
+        else
+            _useFilteredScan = false
+            inStock = {}
         end
     end
-    items = nil  -- help GC release the (potentially huge) network snapshot
+
+    if _useFilteredScan == false then
+        -- Bulk fallback: scan everything once, then drop the snapshot.
+        local wanted = {}
+        for key, _ in pairs(M.config.stockList) do wanted[key] = true end
+        local items = state.me.getItemsInNetwork() or {}
+        for _, item in pairs(items) do
+            if type(item) == "table" and item.name then
+                local k = itemKey(item.name, item.damage)
+                if wanted[k] then
+                    inStock[k] = item.size or 0
+                end
+            end
+        end
+        items = nil
+    end
+
     state.inStock = inStock
 
     -- Isolate each item: a thrown error processing one must not prevent
