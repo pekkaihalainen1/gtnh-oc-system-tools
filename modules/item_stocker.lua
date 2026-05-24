@@ -86,22 +86,36 @@ local function saveMyConfig()
     _cfg.save("config.cfg", full)
 end
 
-local function itemKey(name, damage)
-    return tostring(name) .. ":" .. tostring(damage or 0)
+-- Key format: "<name>:<damage>\x1F<label>"
+-- ASCII Unit Separator (\x1F) is unlikely to appear in any item name or label.
+-- The label is included because AE2FC drops (and similarly NBT-tagged items)
+-- share the same name+damage and can only be distinguished by their label.
+local KEY_SEP = "\x1F"
+
+local function itemKey(name, damage, label)
+    return tostring(name) .. ":" .. tostring(damage or 0) .. KEY_SEP .. tostring(label or "")
 end
 
--- Inverse of itemKey: split "modid:item_name:damage" back into (name, damage).
--- The damage is always the part after the LAST colon, so item names with
--- their own colons (modid:item) are preserved correctly.
+-- Returns (name, damage, label). Tolerates legacy keys (no separator) by
+-- treating the whole key as name:damage and returning label = "".
 local function parseKey(key)
-    local lastColon = nil
-    for i = #key, 1, -1 do
-        if key:sub(i, i) == ":" then lastColon = i; break end
+    local sepIdx = key:find(KEY_SEP, 1, true)
+    local dataPart, label
+    if sepIdx then
+        dataPart = key:sub(1, sepIdx - 1)
+        label    = key:sub(sepIdx + 1)
+    else
+        dataPart = key
+        label    = ""
+    end
+    local lastColon
+    for i = #dataPart, 1, -1 do
+        if dataPart:sub(i, i) == ":" then lastColon = i; break end
     end
     if lastColon then
-        return key:sub(1, lastColon - 1), tonumber(key:sub(lastColon + 1)) or 0
+        return dataPart:sub(1, lastColon - 1), tonumber(dataPart:sub(lastColon + 1)) or 0, label
     end
-    return key, 0
+    return dataPart, 0, label
 end
 
 local function clampScroll(cursor, scrollOff, visible)
@@ -212,6 +226,48 @@ function M.getNextCheckIn()
     return math.max(0, math.floor(remaining))
 end
 
+-- Upgrade legacy `name:damage` keys in stockList to the new
+-- `name:damage<SEP>label` format. Called after refreshPatterns so we can
+-- match each legacy entry to a real pattern (by name+damage+label) and
+-- adopt that pattern's new key. Without this, items added before the
+-- label-aware format would silently fail to match any craftable.
+local function migrateStockListKeys()
+    local changed = false
+    local newList = {}
+    for oldKey, entry in pairs(M.config.stockList) do
+        if oldKey:find(KEY_SEP, 1, true) then
+            newList[oldKey] = entry  -- already new format
+        else
+            -- Reconstruct the legacy name:damage so we can match patterns.
+            -- The legacy parseKey returned (name, damage); under the new
+            -- parseKey, label is "" for legacy keys.
+            local legacyName, legacyDmg = parseKey(oldKey)
+            local newKey = nil
+            for _, p in ipairs(state.patterns) do
+                local pname, pdmg, plabel = parseKey(p.key)
+                if pname == legacyName and pdmg == legacyDmg and plabel == (entry.label or "") then
+                    newKey = p.key
+                    break
+                end
+            end
+            if newKey then
+                newList[newKey] = entry
+                changed = true
+            else
+                -- No pattern match (item may not be craftable anymore).
+                -- Keep entry under a synthesized new-format key so it
+                -- isn't lost, and the user can decide what to do.
+                newList[itemKey(legacyName, legacyDmg, entry.label or "")] = entry
+                changed = true
+            end
+        end
+    end
+    if changed then
+        M.config.stockList = newList
+        pcall(saveMyConfig)
+    end
+end
+
 local function rebuildStockedList()
     state.stockedList = {}
     for key, entry in pairs(M.config.stockList) do
@@ -268,7 +324,7 @@ local function refreshPatterns()
         if type(c) == "table" or type(c) == "userdata" then
             local label, name, damage = extractItemInfo(c)
             if label then
-                local k = itemKey(name or "unknown", damage or 0)
+                local k = itemKey(name or "unknown", damage or 0, label)
                 newPats[#newPats + 1] = { key = k, label = tostring(label) }
                 newByKey[k] = c
             end
@@ -279,6 +335,10 @@ local function refreshPatterns()
     _patsByKey     = newByKey
     _lastPatternRefresh = computer.uptime()
     rebuildFilteredPatterns()
+    -- Upgrade legacy stockList keys to the new label-aware format whenever
+    -- patterns are (re)loaded. Cheap no-op if already migrated.
+    pcall(migrateStockListKeys)
+    pcall(rebuildStockedList)
     -- Free the old craftable userdata refs and any transient garbage
     collectgarbage("collect")
 end
@@ -407,18 +467,23 @@ local function checkAndStock()
     if _useFilteredScan ~= false then
         local allOk = true
         for key, _ in pairs(M.config.stockList) do
-            local name, damage = parseKey(key)
+            local name, damage, label = parseKey(key)
             local ok, result = pcall(function()
-                return state.me.getItemsInNetwork({name = name, damage = damage})
+                return state.me.getItemsInNetwork({name = name, damage = damage, label = label})
             end)
             if not ok or type(result) ~= "table" then
                 allOk = false
                 break
             end
+            -- ALWAYS filter by label in our own code: the AE2 filter may
+            -- ignore unknown keys, so multiple NBT-variants (e.g., AE2FC
+            -- drops) can still come back. Skip mismatches explicitly.
             local total = 0
             for _, item in pairs(result) do
                 if type(item) == "table" and item.name == name then
-                    total = total + (item.size or 0)
+                    if label == "" or item.label == label then
+                        total = total + (item.size or 0)
+                    end
                 end
             end
             inStock[key] = total
@@ -434,14 +499,24 @@ local function checkAndStock()
 
     if _useFilteredScan == false then
         -- Bulk fallback: scan everything once, then drop the snapshot.
-        local wanted = {}
-        for key, _ in pairs(M.config.stockList) do wanted[key] = true end
+        local wantedByNameDmg = {}
+        for key, _ in pairs(M.config.stockList) do
+            local n, d, l = parseKey(key)
+            local ndKey = n .. ":" .. tostring(d)
+            wantedByNameDmg[ndKey] = wantedByNameDmg[ndKey] or {}
+            table.insert(wantedByNameDmg[ndKey], { key = key, label = l })
+        end
         local items = state.me.getItemsInNetwork() or {}
         for _, item in pairs(items) do
             if type(item) == "table" and item.name then
-                local k = itemKey(item.name, item.damage)
-                if wanted[k] then
-                    inStock[k] = item.size or 0
+                local ndKey = item.name .. ":" .. tostring(item.damage or 0)
+                local candidates = wantedByNameDmg[ndKey]
+                if candidates then
+                    for _, cand in ipairs(candidates) do
+                        if cand.label == "" or item.label == cand.label then
+                            inStock[cand.key] = (inStock[cand.key] or 0) + (item.size or 0)
+                        end
+                    end
                 end
             end
         end
