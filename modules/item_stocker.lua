@@ -379,16 +379,29 @@ local _cancelCooldown = {}
 
 -- evaluateJob returns one of:
 --   nil          - still in flight, leave pending in place
---   "done"       - target reached or job.isDone() == true
+--   "done"       - target reached, requested amount delivered, or AE released
+--                  the job cleanly with stock having moved
 --   "cancelled"  - user cancelled via the terminal (job.isCanceled() == true)
 --   "stalled"    - no stock movement for STALL_WINDOW (>= active phase)
 --   "timeout"    - absolute backstop CRAFT_TIMEOUT exceeded
---   "failed"     - never confirmed start within CONFIRM_WINDOW (ghost submission)
+--   "failed"     - never confirmed start, or AE released without delivery
 local function evaluateJob(pending, current, level)
     local now = computer.uptime()
 
-    -- Completion via stock reaching the target works in any lifecycle stage.
+    -- Track peak stock seen since the request. Used to detect when AE
+    -- delivered the amount we asked for, even if `level` isn't met yet
+    -- (the case when perCycle limits a request to a partial chunk).
+    pending.initialStock = pending.initialStock or current
+    pending.peakStock    = math.max(pending.peakStock or pending.initialStock, current)
+
+    -- ── Completion signals (any lifecycle stage) ────────────────────────────
+
     if current >= level then return "done" end
+
+    -- We received what we asked for.
+    if pending.peakStock >= (pending.initialStock or 0) + (pending.amount or 0) then
+        return "done"
+    end
 
     -- Trust isDone() only when positive.
     if pending.job then
@@ -396,46 +409,62 @@ local function evaluateJob(pending, current, level)
         if okD and done then return "done" end
     end
 
-    -- Track stock movement once and use it both for confirmation and stalls.
+    -- ── Sample current job state and remember whether we ever saw it active ─
+    local computingNow, linkedNow = nil, nil
+    if pending.job then
+        local okC, computing = pcall(function() return pending.job.isComputing() end)
+        if okC then
+            computingNow = computing
+            if computing then pending.everSeenComputing = true end
+        end
+        local okL, linked = pcall(function() return pending.job.isLinked() end)
+        if okL then
+            linkedNow = linked
+            if linked then pending.everSeenLinked = true end
+        end
+    end
+
+    -- Stock movement bookkeeping (for stall detection).
     pending.lastSeenStock = pending.lastSeenStock or current
-    local stockMoved = (current ~= pending.lastSeenStock)
-    if stockMoved then
+    if current ~= pending.lastSeenStock then
         pending.lastSeenStock  = current
         pending.lastProgressAt = now
     end
 
     -- ── Submitted: waiting to confirm the craft actually started ────────────
     if pending.lifecycle == JOB_SUBMITTED then
-        local confirmed = false
-        if pending.job then
-            local okC, computing = pcall(function() return pending.job.isComputing() end)
-            if okC and computing then confirmed = true end
-            if not confirmed then
-                local okL, linked = pcall(function() return pending.job.isLinked() end)
-                if okL and linked then confirmed = true end
-            end
-        end
-        -- Stock movement from initial is also proof the request took effect.
-        if not confirmed and current ~= (pending.initialStock or current) then
-            confirmed = true
-        end
+        local confirmed = pending.everSeenComputing or pending.everSeenLinked
+                       or (current ~= pending.initialStock)
 
         if confirmed then
             pending.lifecycle   = JOB_ACTIVE
             pending.confirmedAt = now
-            return nil  -- still running, just now in active phase
+            return nil
         end
 
         if now - pending.requestedAt > CONFIRM_WINDOW then
-            return "failed"  -- ghost submission, retry on next cycle
+            return "failed"
         end
-        return nil  -- still within the confirmation window
+        return nil
     end
 
-    -- ── Active: watch for cancellation, stall, and absolute timeout ─────────
+    -- ── Active: watch for cancellation, release, stall, and timeout ─────────
     if pending.job then
         local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
         if okC and cancelled then return "cancelled" end
+    end
+
+    -- "AE released the job": we saw isLinked or isComputing positive at some
+    -- point, and now both report false. AE has finished processing it.
+    -- If stock moved, AE delivered something - call it done. If stock never
+    -- moved, AE silently dropped the request - treat as failed and retry.
+    local sawActive = pending.everSeenComputing or pending.everSeenLinked
+    if sawActive and computingNow == false and linkedNow == false then
+        if current > (pending.initialStock or 0) then
+            return "done"
+        else
+            return "failed"
+        end
     end
 
     local progressRef = pending.lastProgressAt or pending.confirmedAt or pending.requestedAt
