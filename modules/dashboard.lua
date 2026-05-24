@@ -215,9 +215,10 @@ function M.drawUI(gpu, x, y, w, h)
         gpu.set(cx, r, e.when)
         gpu.setForeground(C_VALUE)
         gpu.set(cx + 9, r, unicode.sub(e.label, 1, labelW))
-        local statusColor = (e.status == "done")   and 0x44CC44
-                         or (e.status == "queued") and 0xBBAA22
-                         or 0xBB3333
+        local statusColor = (e.status == "done")    and 0x44CC44   -- green
+                         or (e.status == "queued")  and 0xBBAA22   -- dull yellow (awaiting confirm)
+                         or (e.status == "running") and 0xBBAA22   -- dull yellow (confirmed active)
+                         or 0xBB3333                                -- dull red (err/stalled/timeout/cancelled/failed)
         gpu.setForeground(statusColor)
         local right
         if ui.isDrop(e.label) then

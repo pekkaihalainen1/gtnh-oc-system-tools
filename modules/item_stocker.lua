@@ -353,34 +353,99 @@ local function refreshPatternsThrottled()
     pcall(refreshPatterns)
 end
 
--- Returns a completion status string, or nil if still running.
--- Stock-based detection only. The AE2 OC API's hasFailed() lies in this
--- version (returns true for jobs that are crafting AND for completed
--- ones), so we ignore it entirely. isDone() is trusted only when it
--- says "true" — we treat "false" as "no information" and rely on stock.
-local function jobStatus(pending, current, level)
+-- ── Job lifecycle constants ──────────────────────────────────────────────────
+--
+-- The previous tracking (kept at git tag `stocker-stock-based-tracking`)
+-- relied purely on stock movement, because hasFailed() was observed to lie.
+-- This version adds a small state machine that also asks the job object
+-- whether the request was actually accepted (isComputing / isLinked), so
+-- we can tell apart:
+--   - ghost submissions that never started     -> "failed", auto-retry
+--   - user cancellations from the terminal     -> "cancelled", apply cooldown
+--   - genuine stalls (CPU stuck, missing res.) -> "stalled", refresh patterns
+--   - natural completion                       -> "done"
+--
+-- Only POSITIVE signals are trusted. hasFailed() is still ignored entirely
+-- because we have observed it returning true for successful crafts.
+
+local JOB_SUBMITTED = "submitted"  -- request() returned a job; awaiting confirm
+local JOB_ACTIVE    = "active"     -- confirmed running (CPU linked or stock moved)
+
+local CONFIRM_WINDOW = 15          -- seconds to confirm submission before giving up
+local CANCEL_COOLDOWN = 300        -- seconds to wait after user-cancel before retry
+
+-- Per-key cooldown timestamps for user-cancelled crafts.
+local _cancelCooldown = {}
+
+-- evaluateJob returns one of:
+--   nil          - still in flight, leave pending in place
+--   "done"       - target reached or job.isDone() == true
+--   "cancelled"  - user cancelled via the terminal (job.isCanceled() == true)
+--   "stalled"    - no stock movement for STALL_WINDOW (>= active phase)
+--   "timeout"    - absolute backstop CRAFT_TIMEOUT exceeded
+--   "failed"     - never confirmed start within CONFIRM_WINDOW (ghost submission)
+local function evaluateJob(pending, current, level)
     local now = computer.uptime()
 
+    -- Completion via stock reaching the target works in any lifecycle stage.
     if current >= level then return "done" end
 
-    -- Trust isDone() only when positive (fast-path completion)
+    -- Trust isDone() only when positive.
     if pending.job then
         local okD, done = pcall(function() return pending.job.isDone() end)
         if okD and done then return "done" end
     end
 
-    -- Any stock change = network is alive; reset stall timer
+    -- Track stock movement once and use it both for confirmation and stalls.
     pending.lastSeenStock = pending.lastSeenStock or current
-    if current ~= pending.lastSeenStock then
+    local stockMoved = (current ~= pending.lastSeenStock)
+    if stockMoved then
         pending.lastSeenStock  = current
         pending.lastProgressAt = now
     end
 
-    if now - (pending.lastProgressAt or pending.requestedAt) > STALL_WINDOW then
+    -- ── Submitted: waiting to confirm the craft actually started ────────────
+    if pending.lifecycle == JOB_SUBMITTED then
+        local confirmed = false
+        if pending.job then
+            local okC, computing = pcall(function() return pending.job.isComputing() end)
+            if okC and computing then confirmed = true end
+            if not confirmed then
+                local okL, linked = pcall(function() return pending.job.isLinked() end)
+                if okL and linked then confirmed = true end
+            end
+        end
+        -- Stock movement from initial is also proof the request took effect.
+        if not confirmed and current ~= (pending.initialStock or current) then
+            confirmed = true
+        end
+
+        if confirmed then
+            pending.lifecycle   = JOB_ACTIVE
+            pending.confirmedAt = now
+            return nil  -- still running, just now in active phase
+        end
+
+        if now - pending.requestedAt > CONFIRM_WINDOW then
+            return "failed"  -- ghost submission, retry on next cycle
+        end
+        return nil  -- still within the confirmation window
+    end
+
+    -- ── Active: watch for cancellation, stall, and absolute timeout ─────────
+    if pending.job then
+        local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
+        if okC and cancelled then return "cancelled" end
+    end
+
+    local progressRef = pending.lastProgressAt or pending.confirmedAt or pending.requestedAt
+    if now - progressRef > STALL_WINDOW then
         return "stalled"
     end
 
-    if now - pending.requestedAt > CRAFT_TIMEOUT then return "timeout" end
+    if now - pending.requestedAt > CRAFT_TIMEOUT then
+        return "timeout"
+    end
 
     return nil
 end
@@ -389,31 +454,56 @@ end
 -- error here cannot block siblings. Returns nothing meaningful.
 local function processItem(key, entry, current)
     if not (entry.level and entry.level > 0) then return end
+    local now = computer.uptime()
 
     -- Resolve pending job if there is one
     if _pendingJobs[key] then
         local pending = _pendingJobs[key]
-        local s = jobStatus(pending, current, entry.level)
+        local s = evaluateJob(pending, current, entry.level)
         if s then
             -- Update the existing "queued" row in place so a single line
-            -- transitions queued -> done/stalled/timeout. Fall back to
-            -- a new entry if the original row was overwritten by the ring.
+            -- transitions queued -> done/cancelled/failed/stalled. Fall
+            -- back to a fresh entry if the original row was overwritten
+            -- by the ring buffer.
             if not updateHistoryStatus(pending.historyId, s) then
                 addHistory(entry.label or key, pending.amount, s)
             end
             _pendingJobs[key] = nil
-            -- A stall/timeout may indicate a stale craftable reference.
-            -- Refresh patterns so the next request uses a fresh object.
-            -- Throttled so back-to-back stalls do not thrash memory.
+
+            if s == "cancelled" then
+                -- User cancelled in the terminal. Respect that intent for
+                -- a while before we consider re-queueing this item.
+                _cancelCooldown[key] = now + CANCEL_COOLDOWN
+                return
+            end
+
             if s == "stalled" or s == "timeout" then
+                -- Stale craftable reference is a common cause. Refresh
+                -- patterns so the next request uses a fresh object.
                 refreshPatternsThrottled()
             end
+            -- "failed" / "stalled" / "timeout" all fall through to the
+            -- submission block below, which will re-queue immediately.
         else
-            return  -- still running, leave it alone
+            -- Promote the lifecycle indicator into history so the row
+            -- shows "running" once the craft is confirmed instead of
+            -- staying stuck on "queued" for the whole duration.
+            if pending.lifecycle == JOB_ACTIVE and not pending.runningLogged then
+                updateHistoryStatus(pending.historyId, "running")
+                pending.runningLogged = true
+            end
+            return  -- still in flight
         end
     end
 
     if current >= entry.level then return end
+
+    -- Skip while still in the cooldown after a user cancel.
+    if _cancelCooldown[key] and now < _cancelCooldown[key] then
+        return
+    elseif _cancelCooldown[key] then
+        _cancelCooldown[key] = nil  -- cooldown expired
+    end
 
     local deficit = entry.level - current
     local amount  = (entry.perCycle and entry.perCycle > 0)
@@ -425,7 +515,8 @@ local function processItem(key, entry, current)
         return
     end
 
-    -- Original working signature first; fall back to alternates if needed.
+    -- Submit the request. Try the prioritize-power signature first
+    -- (proven on the user's AE2 build), then fall back to alternates.
     local ok, job = pcall(function() return craftable.request(amount, true, nil) end)
     if not ok or job == nil then
         ok, job = pcall(function() return craftable.request(amount, false) end)
@@ -433,7 +524,7 @@ local function processItem(key, entry, current)
     if not ok or job == nil then
         ok, job = pcall(function() return craftable.request(amount) end)
     end
-    -- Last resort: ME-level requestCrafting using the parsed key
+    -- Last resort: ME-level requestCrafting using the parsed key.
     if not ok or job == nil then
         local name, damage = parseKey(key)
         ok, job = pcall(function()
@@ -442,15 +533,17 @@ local function processItem(key, entry, current)
     end
 
     if ok and job ~= nil then
-        local now = computer.uptime()
         local hid = addHistory(entry.label or key, amount, "queued")
         _pendingJobs[key] = {
             job            = job,
             requestedAt    = now,
             amount         = amount,
+            initialStock   = current,
             lastSeenStock  = current,
             lastProgressAt = now,
             historyId      = hid,
+            lifecycle      = JOB_SUBMITTED,
+            runningLogged  = false,
         }
     else
         addHistory(entry.label or key, amount, "err")
