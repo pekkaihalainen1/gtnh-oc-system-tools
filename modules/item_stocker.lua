@@ -5,6 +5,7 @@ local computer  = require("computer")
 local keyboard  = require("keyboard")
 local os        = require("os")
 local unicode   = require("unicode")
+local ui        = require("lib/ui")
 
 local M = {}
 M.id   = "item_stocker"
@@ -542,26 +543,45 @@ end
 
 -- ── Editor helpers ────────────────────────────────────────────────────────────
 
+-- Format an mB integer back into a compact drop string for the editor buffer
+-- (e.g., 2000 -> "2L", 10000000 -> "10KL"). For non-drop items, just stringify.
+local function editorFormat(value, isDropItem)
+    if isDropItem then return ui.formatDrop(value or 0) end
+    return tostring(value or 0)
+end
+
+-- Parse the editor buffer back to an integer count. For drops, accepts unit
+-- suffixes (mb/L/KL/ML). Returns 0 on unparseable input rather than nil so
+-- the caller never has to error-handle.
+local function editorParse(str, isDropItem)
+    if isDropItem then
+        return ui.parseDropAmount(str) or tonumber(str) or 0
+    end
+    return tonumber(str) or 0
+end
+
 local function openEditor(key, label)
     local existing = M.config.stockList[key] or {}
+    local isDropItem = ui.isDrop(label or "")
     state.editorMode  = true
     state.editorKey   = key
     state.editorLabel = label or key
+    state.editorIsDrop = isDropItem
     state.editorField = "level"
     state.editorLevel = existing.level or 0
-    state.editorBuf   = tostring(existing.level or 0)
-    -- store perCycle for Tab switch
-    state._editorPerCycle = tostring(existing.perCycle or 1)
+    state.editorBuf   = editorFormat(existing.level or 0, isDropItem)
+    state._editorPerCycle = editorFormat(existing.perCycle or 1, isDropItem)
 end
 
 local function closeEditor(save)
     if save and state.editorKey then
+        local isDropItem = state.editorIsDrop
         local lvl = tonumber(state.editorLevel) or 0
-        local pc  = tonumber(state._editorPerCycle) or 1
+        local pc  = editorParse(state._editorPerCycle or "1", isDropItem)
         if state.editorField == "level" then
-            lvl = tonumber(state.editorBuf) or 0
+            lvl = editorParse(state.editorBuf, isDropItem)
         else
-            pc  = tonumber(state.editorBuf) or 0
+            pc  = editorParse(state.editorBuf, isDropItem)
         end
         M.config.stockList[state.editorKey] = {
             level    = math.max(0, math.floor(lvl)),
@@ -576,6 +596,7 @@ local function closeEditor(save)
     state.editorLabel = ""
     state.editorBuf   = ""
     state._editorPerCycle = nil
+    state.editorIsDrop = nil
 end
 
 local function removeFromStock(key)
@@ -725,7 +746,11 @@ function M.drawUI(gpu, x, y, w, h)
                         right = string.format("wait %ds", age)
                     else
                         local cur = state.inStock[item.key] or 0
-                        right = string.format("%d/%d", cur, item.level)
+                        if ui.isDrop(item.label) then
+                            right = ui.formatDrop(cur) .. "/" .. ui.formatDrop(item.level)
+                        else
+                            right = string.format("%d/%d", cur, item.level)
+                        end
                     end
                     local lw   = pw - #marker - #right - 1
                     local lbl  = unicode.sub(item.label, 1, lw)
@@ -768,7 +793,12 @@ function M.drawUI(gpu, x, y, w, h)
         local lvlLabel = "MAINTAIN LEVEL  : "
         gpu.setForeground(C_LABEL)
         gpu.set(x + 2, er + 2, lvlLabel)
-        local lvlBuf = (state.editorField == "level") and state.editorBuf or tostring(state.editorLevel)
+        local lvlBuf
+        if state.editorField == "level" then
+            lvlBuf = state.editorBuf
+        else
+            lvlBuf = editorFormat(state.editorLevel, state.editorIsDrop)
+        end
         if state.editorField == "level" then
             gpu.setBackground(C_ACT)
             gpu.setForeground(C_VALUE)
@@ -828,16 +858,33 @@ end
 
 function M.handleKey(char, code)
     if state.editorMode then
-        -- Editor mode
-        if char >= 48 and char <= 57 then  -- digits
-            if #state.editorBuf < 9 then
+        local isDropItem = state.editorIsDrop
+        -- Drop editor accepts digits, decimal point, and unit letters (m/b/l/k/M/B/L/K),
+        -- plus 'M' for ML. Plain items accept only digits.
+        local accept = false
+        if char >= 48 and char <= 57 then              -- 0-9
+            accept = true
+        elseif isDropItem then
+            if char == 46 then                          -- '.'
+                accept = true
+            elseif char == 77 or char == 109            -- 'M' / 'm'
+                or char == 75 or char == 107            -- 'K' / 'k'
+                or char == 76 or char == 108            -- 'L' / 'l'
+                or char == 66 or char == 98 then        -- 'B' / 'b'
+                accept = true
+            end
+        end
+        local maxLen = isDropItem and 12 or 9
+
+        if accept then
+            if #state.editorBuf < maxLen then
                 state.editorBuf = state.editorBuf .. string.char(char)
             end
         elseif code == keyboard.keys.back then
             state.editorBuf = state.editorBuf:sub(1, -2)
         elseif code == keyboard.keys.enter then
             if state.editorField == "level" then
-                state.editorLevel = tonumber(state.editorBuf) or 0
+                state.editorLevel = editorParse(state.editorBuf, isDropItem)
                 state.editorBuf   = state._editorPerCycle or "1"
                 state.editorField = "perCycle"
             else

@@ -219,7 +219,12 @@ function M.drawUI(gpu, x, y, w, h)
                          or (e.status == "queued") and 0xBBAA22
                          or 0xBB3333
         gpu.setForeground(statusColor)
-        local right = string.format("%5dx %-7s", e.amount, e.status:sub(1, 7))
+        local right
+        if ui.isDrop(e.label) then
+            right = string.format("%6s %-7s", ui.formatDrop(e.amount), e.status:sub(1, 7))
+        else
+            right = string.format("%5dx %-7s", e.amount, e.status:sub(1, 7))
+        end
         gpu.set(x + w - 1 - rightW, r, right)
     end
 

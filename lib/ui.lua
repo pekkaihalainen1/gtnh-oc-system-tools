@@ -48,6 +48,56 @@ function ui.formatEU(n)
     end
 end
 
+-- True for AE2FC-style drop labels: "drop of Water", "Drop of Lava", etc.
+-- These represent fluids as items where 1 drop = 1 mB.
+function ui.isDrop(label)
+    if type(label) ~= "string" then return false end
+    return label:sub(1, 4):lower() == "drop"
+end
+
+-- Compact fluid amount from a count of drops (1 drop = 1 mB):
+--   <1000 mB        -> "999mB"
+--   <1,000,000 mB   -> "999L"
+--   <1,000,000,000  -> "999KL"
+--   otherwise       -> "1.2ML"
+function ui.formatDrop(mB)
+    mB = math.floor(mB or 0)
+    if mB < 1000 then
+        return string.format("%dmB", mB)
+    elseif mB < 1000000 then
+        return string.format("%dL",  math.floor(mB / 1000))
+    elseif mB < 1000000000 then
+        return string.format("%dKL", math.floor(mB / 1000000))
+    else
+        return string.format("%.1fML", mB / 1000000000)
+    end
+end
+
+-- Parse a fluid-amount string (case-insensitive) back into a count of mB:
+--   "500"     -> 500       "500mb"  -> 500
+--   "2L"      -> 2000      "2.5L"   -> 2500
+--   "10KL"    -> 10000000  "2.3ML"  -> 2300000000
+-- Returns nil if the string cannot be parsed.
+function ui.parseDropAmount(str)
+    if type(str) ~= "string" or str == "" then return nil end
+    local s = str:lower():gsub("%s+", "")
+    local num, unit = s:match("^(%d+%.?%d*)([a-z]*)$")
+    if not num then num, unit = s:match("^(%.%d+)([a-z]*)$") end
+    if not num then return nil end
+    local n = tonumber(num)
+    if not n then return nil end
+    if unit == "" or unit == "mb" then
+        return math.floor(n)
+    elseif unit == "l" then
+        return math.floor(n * 1000)
+    elseif unit == "kl" then
+        return math.floor(n * 1000000)
+    elseif unit == "ml" then
+        return math.floor(n * 1000000000)
+    end
+    return nil
+end
+
 -- Human-readable duration from seconds: "~2h 14m", "~45m 3s", "< 1s"
 -- Returns "---" for nil, negative, or very large values.
 function ui.formatTime(seconds)
