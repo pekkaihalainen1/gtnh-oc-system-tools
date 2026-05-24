@@ -55,28 +55,30 @@ function ui.isDrop(label)
     return label:sub(1, 4):lower() == "drop"
 end
 
--- Compact fluid amount from a count of drops (1 drop = 1 mB):
---   <1000 mB        -> "999mB"
---   <1,000,000 mB   -> "999L"
---   <1,000,000,000  -> "999KL"
---   otherwise       -> "1.2ML"
+-- Compact fluid amount. Unit relationships in this mod context:
+--   1 L  = 1 mB         (same unit, two names)
+--   1 KL = 1000 mB
+--   1 ML = 1,000,000 mB
+-- Display tiers:
+--   <1000 mB         -> "999mB"
+--   1000-999,999 mB  -> "999KL"     (floored)
+--   >=1,000,000 mB   -> "1.2ML"
 function ui.formatDrop(mB)
     mB = math.floor(mB or 0)
     if mB < 1000 then
         return string.format("%dmB", mB)
     elseif mB < 1000000 then
-        return string.format("%dL",  math.floor(mB / 1000))
-    elseif mB < 1000000000 then
-        return string.format("%dKL", math.floor(mB / 1000000))
+        return string.format("%dKL", math.floor(mB / 1000))
     else
-        return string.format("%.1fML", mB / 1000000000)
+        return string.format("%.1fML", mB / 1000000)
     end
 end
 
 -- Parse a fluid-amount string (case-insensitive) back into a count of mB:
---   "500"     -> 500       "500mb"  -> 500
---   "2L"      -> 2000      "2.5L"   -> 2500
---   "10KL"    -> 10000000  "2.3ML"  -> 2300000000
+--   "500"     -> 500         "500mb"  -> 500
+--   "500L"    -> 500         "2.5L"   -> 2   (L == mB so non-integer rounds down)
+--   "10KL"    -> 10000       "2.3KL"  -> 2300
+--   "5ML"     -> 5000000     "2.3ML"  -> 2300000
 -- Returns nil if the string cannot be parsed.
 function ui.parseDropAmount(str)
     if type(str) ~= "string" or str == "" then return nil end
@@ -86,14 +88,12 @@ function ui.parseDropAmount(str)
     if not num then return nil end
     local n = tonumber(num)
     if not n then return nil end
-    if unit == "" or unit == "mb" then
+    if unit == "" or unit == "mb" or unit == "l" then
         return math.floor(n)
-    elseif unit == "l" then
-        return math.floor(n * 1000)
     elseif unit == "kl" then
-        return math.floor(n * 1000000)
+        return math.floor(n * 1000)
     elseif unit == "ml" then
-        return math.floor(n * 1000000000)
+        return math.floor(n * 1000000)
     end
     return nil
 end
