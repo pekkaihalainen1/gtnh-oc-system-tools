@@ -353,113 +353,97 @@ local function refreshPatternsThrottled()
     pcall(refreshPatterns)
 end
 
--- ── Job lifecycle constants ──────────────────────────────────────────────────
+-- ── Pending craft tracking ───────────────────────────────────────────────────
 --
--- The previous tracking (kept at git tag `stocker-stock-based-tracking`)
--- relied purely on stock movement, because hasFailed() was observed to lie.
--- This version adds a small state machine that also asks the job object
--- whether the request was actually accepted (isComputing / isLinked), so
--- we can tell apart:
---   - ghost submissions that never started     -> "failed", auto-retry
---   - user cancellations from the terminal     -> "cancelled", apply cooldown
---   - genuine stalls (CPU stuck, missing res.) -> "stalled", refresh patterns
---   - natural completion                       -> "done"
+-- Trust principle: if craftable.request() returned a job object, AE accepted
+-- the submission. A craft can sit in AE's CPU queue for a long time (hours)
+-- behind larger jobs; during that wait neither isLinked nor isComputing will
+-- be true, but the job IS valid and re-submitting would just duplicate it.
 --
--- Only POSITIVE signals are trusted. hasFailed() is still ignored entirely
--- because we have observed it returning true for successful crafts.
+-- Earlier revisions (preserved at git tag `stocker-stock-based-tracking`,
+-- and at commit b4676f3 for the first state machine) timed out submissions
+-- after 15 s and re-queued. That caused duplicate craft entries in AE for
+-- any job waiting behind a larger one. This version removes that timeout
+-- and waits indefinitely - only stall (after the job becomes active) and
+-- the 2 h CRAFT_TIMEOUT backstop end a pending entry.
+--
+-- everSeenActive: latched true the first time we observe ANY positive
+-- signal that AE has started processing the job. Used to:
+--   - promote the history row from "queued" to "running"
+--   - gate the stall detector so queued-but-waiting jobs do not stall
+--   - enable release detection (was active, now both signals false)
+--
+-- Only positive signals are trusted. hasFailed() is still ignored entirely.
 
-local JOB_SUBMITTED = "submitted"  -- request() returned a job; awaiting confirm
-local JOB_ACTIVE    = "active"     -- confirmed running (CPU linked or stock moved)
+local CANCEL_COOLDOWN = 300        -- seconds after a user-cancel before retry
+local FAILED_COOLDOWN = 300        -- seconds after AE silently dropped a craft
 
-local CONFIRM_WINDOW = 15          -- seconds to confirm submission before giving up
-local CANCEL_COOLDOWN = 300        -- seconds to wait after user-cancel before retry
-
--- Per-key cooldown timestamps for user-cancelled crafts.
-local _cancelCooldown = {}
+local _cancelCooldown = {}         -- key -> uptime to retry after user cancel
+local _failedCooldown = {}         -- key -> uptime to retry after silent failure
 
 -- evaluateJob returns one of:
 --   nil          - still in flight, leave pending in place
---   "done"       - target reached, requested amount delivered, or AE released
---                  the job cleanly with stock having moved
---   "cancelled"  - user cancelled via the terminal (job.isCanceled() == true)
---   "stalled"    - no stock movement for STALL_WINDOW (>= active phase)
+--   "done"       - target reached, requested amount delivered, isDone(true),
+--                  or AE released the job after delivering stock
+--   "cancelled"  - user cancelled via the terminal (isCanceled(true))
+--   "stalled"    - job became active but no stock movement for STALL_WINDOW
 --   "timeout"    - absolute backstop CRAFT_TIMEOUT exceeded
---   "failed"     - never confirmed start, or AE released without delivery
+--   "failed"     - AE released the job without any stock being delivered
 local function evaluateJob(pending, current, level)
     local now = computer.uptime()
 
-    -- Track peak stock seen since the request. Used to detect when AE
-    -- delivered the amount we asked for, even if `level` isn't met yet
-    -- (the case when perCycle limits a request to a partial chunk).
     pending.initialStock = pending.initialStock or current
     pending.peakStock    = math.max(pending.peakStock or pending.initialStock, current)
 
-    -- ── Completion signals (any lifecycle stage) ────────────────────────────
+    -- ── Completion signals (apply regardless of phase) ──────────────────────
 
     if current >= level then return "done" end
 
-    -- We received what we asked for.
+    -- We received the amount we requested - this craft is done even if the
+    -- overall level isn't met yet (perCycle splits the deficit into chunks).
     if pending.peakStock >= (pending.initialStock or 0) + (pending.amount or 0) then
         return "done"
     end
 
-    -- Trust isDone() only when positive.
+    -- Trust isDone()/isCanceled() only when positive.
     if pending.job then
         local okD, done = pcall(function() return pending.job.isDone() end)
         if okD and done then return "done" end
+
+        local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
+        if okC and cancelled then return "cancelled" end
     end
 
-    -- ── Sample current job state and remember whether we ever saw it active ─
+    -- ── Sample current AE state ─────────────────────────────────────────────
     local computingNow, linkedNow = nil, nil
     if pending.job then
         local okC, computing = pcall(function() return pending.job.isComputing() end)
         if okC then
             computingNow = computing
-            if computing then pending.everSeenComputing = true end
+            if computing then pending.everSeenActive = true end
         end
         local okL, linked = pcall(function() return pending.job.isLinked() end)
         if okL then
             linkedNow = linked
-            if linked then pending.everSeenLinked = true end
+            if linked then pending.everSeenActive = true end
         end
     end
 
-    -- Stock movement bookkeeping (for stall detection).
+    -- Stock movement bookkeeping. Any change also counts as proof AE is
+    -- processing the job, so it latches everSeenActive.
     pending.lastSeenStock = pending.lastSeenStock or current
     if current ~= pending.lastSeenStock then
         pending.lastSeenStock  = current
         pending.lastProgressAt = now
+        pending.everSeenActive = true
     end
 
-    -- ── Submitted: waiting to confirm the craft actually started ────────────
-    if pending.lifecycle == JOB_SUBMITTED then
-        local confirmed = pending.everSeenComputing or pending.everSeenLinked
-                       or (current ~= pending.initialStock)
-
-        if confirmed then
-            pending.lifecycle   = JOB_ACTIVE
-            pending.confirmedAt = now
-            return nil
-        end
-
-        if now - pending.requestedAt > CONFIRM_WINDOW then
-            return "failed"
-        end
-        return nil
-    end
-
-    -- ── Active: watch for cancellation, release, stall, and timeout ─────────
-    if pending.job then
-        local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
-        if okC and cancelled then return "cancelled" end
-    end
-
-    -- "AE released the job": we saw isLinked or isComputing positive at some
-    -- point, and now both report false. AE has finished processing it.
-    -- If stock moved, AE delivered something - call it done. If stock never
-    -- moved, AE silently dropped the request - treat as failed and retry.
-    local sawActive = pending.everSeenComputing or pending.everSeenLinked
-    if sawActive and computingNow == false and linkedNow == false then
+    -- ── Release detection ───────────────────────────────────────────────────
+    -- If we ever saw the job active and now both signals report false, AE
+    -- has finished processing it. Disambiguate by stock movement:
+    --   stock moved from initial -> "done" (delivery happened)
+    --   no stock movement        -> "failed" (silent rejection; cooldown)
+    if pending.everSeenActive and computingNow == false and linkedNow == false then
         if current > (pending.initialStock or 0) then
             return "done"
         else
@@ -467,9 +451,15 @@ local function evaluateJob(pending, current, level)
         end
     end
 
-    local progressRef = pending.lastProgressAt or pending.confirmedAt or pending.requestedAt
-    if now - progressRef > STALL_WINDOW then
-        return "stalled"
+    -- ── Stall: only meaningful AFTER the job became active ─────────────────
+    -- A job queued in AE behind a larger one may legitimately sit idle for
+    -- hours. We do NOT stall during that wait; the absolute CRAFT_TIMEOUT
+    -- is the only ceiling. Once the job becomes active, normal stall
+    -- detection kicks in.
+    if pending.everSeenActive and pending.lastProgressAt then
+        if now - pending.lastProgressAt > STALL_WINDOW then
+            return "stalled"
+        end
     end
 
     if now - pending.requestedAt > CRAFT_TIMEOUT then
@@ -500,24 +490,27 @@ local function processItem(key, entry, current)
             _pendingJobs[key] = nil
 
             if s == "cancelled" then
-                -- User cancelled in the terminal. Respect that intent for
-                -- a while before we consider re-queueing this item.
                 _cancelCooldown[key] = now + CANCEL_COOLDOWN
+                return
+            end
+
+            if s == "failed" then
+                -- AE released without delivering. Wait before retrying
+                -- so we do not spam an unfulfillable pattern.
+                _failedCooldown[key] = now + FAILED_COOLDOWN
                 return
             end
 
             if s == "stalled" or s == "timeout" then
                 -- Stale craftable reference is a common cause. Refresh
-                -- patterns so the next request uses a fresh object.
+                -- patterns (throttled) so the next request uses a fresh object.
                 refreshPatternsThrottled()
             end
-            -- "failed" / "stalled" / "timeout" all fall through to the
-            -- submission block below, which will re-queue immediately.
+            -- "stalled" / "timeout" fall through to the submission block.
         else
-            -- Promote the lifecycle indicator into history so the row
-            -- shows "running" once the craft is confirmed instead of
-            -- staying stuck on "queued" for the whole duration.
-            if pending.lifecycle == JOB_ACTIVE and not pending.runningLogged then
+            -- Promote the row from "queued" to "running" the first time
+            -- AE confirms the craft has started moving.
+            if pending.everSeenActive and not pending.runningLogged then
                 updateHistoryStatus(pending.historyId, "running")
                 pending.runningLogged = true
             end
@@ -527,12 +520,11 @@ local function processItem(key, entry, current)
 
     if current >= entry.level then return end
 
-    -- Skip while still in the cooldown after a user cancel.
-    if _cancelCooldown[key] and now < _cancelCooldown[key] then
-        return
-    elseif _cancelCooldown[key] then
-        _cancelCooldown[key] = nil  -- cooldown expired
-    end
+    -- Cooldowns after user cancel or AE silent rejection.
+    if _cancelCooldown[key] and now < _cancelCooldown[key] then return end
+    if _failedCooldown[key] and now < _failedCooldown[key] then return end
+    _cancelCooldown[key] = nil
+    _failedCooldown[key] = nil
 
     local deficit = entry.level - current
     local amount  = (entry.perCycle and entry.perCycle > 0)
@@ -568,10 +560,11 @@ local function processItem(key, entry, current)
             requestedAt    = now,
             amount         = amount,
             initialStock   = current,
+            peakStock      = current,
             lastSeenStock  = current,
-            lastProgressAt = now,
+            lastProgressAt = nil,         -- only set once stock actually moves
             historyId      = hid,
-            lifecycle      = JOB_SUBMITTED,
+            everSeenActive = false,
             runningLogged  = false,
         }
     else
