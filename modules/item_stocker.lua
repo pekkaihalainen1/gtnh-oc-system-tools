@@ -73,6 +73,7 @@ local state = {
     screenH      = 0,
     error        = nil,
     inStock      = {},  -- itemKey -> current count, updated each check cycle
+    crafting     = {},  -- nameLabelKey -> true for items on busy CPUs this cycle
 }
 
 local _patsByKey    = {}  -- itemKey -> craftable object cache
@@ -128,6 +129,14 @@ local function parseKey(key)
         return dataPart:sub(1, lastColon - 1), tonumber(dataPart:sub(lastColon + 1)) or 0, label
     end
     return dataPart, 0, label
+end
+
+-- Key by name+label only (ignores damage). This is the reliable common
+-- denominator for matching a stocked item to network items and to the
+-- items reported by busy crafting CPUs (this fork's craftable/CPU stacks
+-- carry no dependable damage).
+local function nameLabelKey(name, label)
+    return tostring(name) .. KEY_SEP .. tostring(label or "")
 end
 
 local function clampScroll(cursor, scrollOff, visible)
@@ -497,6 +506,13 @@ local function processItem(key, entry, current)
     -- Resolve pending job if there is one
     if _pendingJobs[key] then
         local pending = _pendingJobs[key]
+        -- If AE reports this item on a busy crafting CPU, it is genuinely
+        -- being made — the reliable "running" signal for this fork (the job
+        -- object has no isLinked() and hasFailed() is unreliable).
+        local pname, _pd, plabel = parseKey(key)
+        if state.crafting[nameLabelKey(pname, plabel)] then
+            pending.everSeenActive = true
+        end
         local s = evaluateJob(pending, current, entry.level)
         if s then
             -- Update the existing "queued" row in place so a single line
@@ -665,6 +681,32 @@ local function checkAndStock()
     end
 
     state.inStock = inStock
+
+    -- Build the set of items currently being crafted on busy CPUs, so pending
+    -- items can be marked "running" accurately. finalOutput() returns nil in
+    -- this fork, so we scan each busy CPU's activeItems()+pendingItems() (the
+    -- things being or about to be crafted) keyed by name+label. storedItems()
+    -- are inputs, not outputs, so we skip them. getCpus is best-effort: any
+    -- failure just yields an empty set (items fall back to stock-based state).
+    local crafting = {}
+    local okCpu, cpus = pcall(function() return state.me.getCpus() end)
+    if okCpu and type(cpus) == "table" then
+        for _, e in pairs(cpus) do
+            if type(e) == "table" and e.busy and e.cpu then
+                for _, method in ipairs({ "activeItems", "pendingItems" }) do
+                    local okI, items = pcall(function() return e.cpu[method]() end)
+                    if okI and type(items) == "table" then
+                        for _, it in pairs(items) do
+                            if type(it) == "table" and it.name then
+                                crafting[nameLabelKey(it.name, it.label)] = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    state.crafting = crafting
 
     -- Isolate each item: a thrown error processing one must not prevent
     -- the others from being processed in the same cycle.
@@ -885,8 +927,15 @@ function M.drawUI(gpu, x, y, w, h)
                     local pending = _pendingJobs[item.key]
                     local right
                     if pending then
-                        local age = math.floor(computer.uptime() - pending.requestedAt)
-                        right = string.format("wait %ds", age)
+                        -- "craft" once AE has it on a busy CPU, otherwise the
+                        -- job is queued/waiting for a free CPU.
+                        local pname, _pd, plabel = parseKey(item.key)
+                        if state.crafting[nameLabelKey(pname, plabel)] then
+                            right = "craft"
+                        else
+                            local age = math.floor(computer.uptime() - pending.requestedAt)
+                            right = string.format("wait %ds", age)
+                        end
                     else
                         local cur = state.inStock[item.key] or 0
                         if ui.isDrop(item.label) then
