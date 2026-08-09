@@ -303,42 +303,6 @@ end
 
 -- ── Component helpers ─────────────────────────────────────────────────────────
 
--- Component types known to expose the AE2 network API, tried first.
-local ME_TYPES = { "me_interface", "me_controller" }
-
--- Locate the ME network component. Newer AE2 / GTNH 2.9.x builds may register
--- an adapter-attached ME Interface under a name other than me_interface, so if
--- the known types are absent we fall back to probing every component for the
--- AE2 query API (getItemsInNetwork / getCraftables). Returns (proxy, typeName)
--- or nil.
-local function findME()
-    for _, t in ipairs(ME_TYPES) do
-        if component.isAvailable(t) then
-            return component.getPrimary(t), t
-        end
-    end
-    for addr, ctype in component.list() do
-        local ok, proxy = pcall(component.proxy, addr)
-        if ok and type(proxy) == "table"
-           and (type(proxy.getItemsInNetwork) == "function"
-                or type(proxy.getCraftables) == "function") then
-            return proxy, ctype
-        end
-    end
-    return nil
-end
-
--- Sorted, de-duplicated list of component types attached to this computer,
--- for an actionable "not found" error.
-local function listComponentTypes()
-    local seen, out = {}, {}
-    for _, ctype in component.list() do
-        if not seen[ctype] then seen[ctype] = true; out[#out + 1] = ctype end
-    end
-    table.sort(out)
-    return table.concat(out, ", ")
-end
-
 local function extractItemInfo(c)
     -- Try getItemStack() method (some AE2 OC versions)
     local ok, stack = pcall(function() return c.getItemStack() end)
@@ -761,11 +725,12 @@ end
 function M.init(gpu, screenW, screenH)
     state.screenW = screenW
     state.screenH = screenH
-    local me, metype = findME()
-    if me then
-        state.me = me
+    if component.isAvailable("me_interface") then
+        state.me = component.me_interface
+    elseif component.isAvailable("me_controller") then
+        state.me = component.me_controller
     else
-        state.error = "No ME network found. Components present: " .. listComponentTypes()
+        state.error = "No ME Interface found — connect one and restart"
     end
     rebuildStockedList()
     pcall(syncRealTime)
@@ -783,12 +748,14 @@ function M.start() end
 function M.update()
     if not state.me then
         -- retry component discovery each cycle in case ME is connected later
-        local me = findME()
-        if me then
-            state.me = me
+        if component.isAvailable("me_interface") then
+            state.me = component.me_interface
             state.error = nil
             state.lastCheck = -math.huge
-            pcall(refreshPatterns)
+        elseif component.isAvailable("me_controller") then
+            state.me = component.me_controller
+            state.error = nil
+            state.lastCheck = -math.huge
         end
         return
     end
