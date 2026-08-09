@@ -425,20 +425,16 @@ local function evaluateJob(pending, current, level)
         return "done"
     end
 
-    -- Trust isDone()/isCanceled()/hasFailed() only when positive.
+    -- Trust isDone()/isCanceled() only when positive. hasFailed() is NOT
+    -- trusted: in this AE2 fork it returns true transiently (reason "no link")
+    -- while a job merely WAITS for a free crafting CPU, then the job goes on
+    -- to craft successfully. Acting on it wrongly marks live crafts "failed"
+    -- (observed: Titanium/Aluminium crafting on CPUs yet reported failed).
+    -- Real, unfulfillable jobs are instead caught when AE cancels them
+    -- (isCanceled) or by the stall/timeout backstops with no stock movement.
     if pending.job then
         local okD, done = pcall(function() return pending.job.isDone() end)
         if okD and done then return "done" end
-
-        -- hasFailed() returns (failed, reason). In the GTNH 2.9.x AE2 fork this
-        -- reliably reports jobs that cannot be fulfilled (e.g. reason "no link"
-        -- when ingredients are missing). Check it BEFORE isCanceled(): AE
-        -- auto-cancels a failed job, so both flags end up true — checking
-        -- hasFailed first labels ingredient shortages "failed", leaving
-        -- "cancelled" for genuine user cancels (where hasFailed stays false).
-        -- Both paths cool down 5 min before retrying.
-        local okF, failed = pcall(function() return pending.job.hasFailed() end)
-        if okF and failed then return "failed" end
 
         local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
         if okC and cancelled then return "cancelled" end
