@@ -45,13 +45,27 @@ local C_NEG    = 0xFF00FF
 
 -- ── Component helpers ─────────────────────────────────────────────────────────
 
+-- True if the proxy exposes one of the energy getter pairs update() knows.
+local function hasEnergyAPI(p)
+    return (p.getEUStored     and p.getEUCapacity)
+        or (p.getEnergyStored and p.getMaxEnergyStored)
+        or (p.getStored       and p.getCapacity)
+end
+
 local function findDetector()
-    if component.isAvailable("gt_machine") then
-        return component.gt_machine
-    elseif component.isAvailable("gt_energydetector") then
-        return component.gt_energydetector
-    elseif component.isAvailable("energy_device") then
-        return component.energy_device
+    -- Do NOT trust component.gt_machine (the "primary"): a base can have
+    -- several gt_machine components (the LSC plus other GT machines on
+    -- adapters), and OpenComputers may pick a different primary after every
+    -- computer restart. If it lands on a machine without getEUStored, the
+    -- old code fell through to "Unknown energy detector API". Instead, scan
+    -- every candidate and return the first that actually has an energy API.
+    for addr, ctype in component.list() do
+        if ctype == "gt_machine" or ctype == "gt_energydetector" or ctype == "energy_device" then
+            local ok, p = pcall(component.proxy, addr)
+            if ok and p and hasEnergyAPI(p) then
+                return p
+            end
+        end
     end
     return nil
 end
