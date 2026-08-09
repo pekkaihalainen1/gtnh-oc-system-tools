@@ -304,12 +304,21 @@ end
 -- ── Component helpers ─────────────────────────────────────────────────────────
 
 local function extractItemInfo(c)
-    -- Try getItemStack() method (some AE2 OC versions)
-    local ok, stack = pcall(function() return c.getItemStack() end)
-    if ok and type(stack) == "table" and stack.label then
-        return stack.label, stack.name, stack.damage
+    -- The GTNH 2.9.x AE2 fork returns each craftable as an OC callback object
+    -- (NetworkControl$Craftable) whose stack is fetched via getStack(). Older
+    -- AE2 OC integrations used getItemStack(). Try both.
+    local ok, stack = pcall(function() return c.getStack() end)
+    if not (ok and type(stack) == "table" and stack.label) then
+        ok, stack = pcall(function() return c.getItemStack() end)
     end
-    -- Try direct fields (plain table or proxy with string properties)
+    if ok and type(stack) == "table" and stack.label then
+        -- Craftable stacks in this fork carry no `damage` field (only `name`,
+        -- `id`, `label`, `size`). `id` is an OC-internal global id, NOT the
+        -- item metadata, so we do not use it. Matching is done by name+label
+        -- (see checkAndStock), so a missing damage is harmless; default to 0.
+        return stack.label, stack.name, stack.damage or 0
+    end
+    -- Fallback: direct string fields (plain table or proxy variants).
     local label  = type(c.label)  == "string" and c.label  or nil
     local name   = type(c.name)   == "string" and c.name   or nil
     local damage = type(c.damage) == "number" and c.damage or 0
@@ -584,8 +593,13 @@ local function checkAndStock()
         local allOk = true
         for key, _ in pairs(M.config.stockList) do
             local name, damage, label = parseKey(key)
+            -- Filter by NAME only. Keys built from craftables carry no real
+            -- damage (the fork's getStack() omits it, so it defaults to 0),
+            -- while network items report a real damage. Passing damage here
+            -- would wrongly exclude the very items we are counting. Name
+            -- narrows the query; label disambiguation happens below.
             local ok, result = pcall(function()
-                return state.me.getItemsInNetwork({name = name, damage = damage, label = label})
+                return state.me.getItemsInNetwork({name = name})
             end)
             if not ok or type(result) ~= "table" then
                 allOk = false
@@ -615,18 +629,19 @@ local function checkAndStock()
 
     if _useFilteredScan == false then
         -- Bulk fallback: scan everything once, then drop the snapshot.
-        local wantedByNameDmg = {}
+        -- Match by NAME (not name:damage): craftable-derived keys have no
+        -- reliable damage, so we group wanted items by name and disambiguate
+        -- by label, exactly like the filtered path.
+        local wantedByName = {}
         for key, _ in pairs(M.config.stockList) do
-            local n, d, l = parseKey(key)
-            local ndKey = n .. ":" .. tostring(d)
-            wantedByNameDmg[ndKey] = wantedByNameDmg[ndKey] or {}
-            table.insert(wantedByNameDmg[ndKey], { key = key, label = l })
+            local n, _d, l = parseKey(key)
+            wantedByName[n] = wantedByName[n] or {}
+            table.insert(wantedByName[n], { key = key, label = l })
         end
         local items = state.me.getItemsInNetwork() or {}
         for _, item in pairs(items) do
             if type(item) == "table" and item.name then
-                local ndKey = item.name .. ":" .. tostring(item.damage or 0)
-                local candidates = wantedByNameDmg[ndKey]
+                local candidates = wantedByName[item.name]
                 if candidates then
                     for _, cand in ipairs(candidates) do
                         if cand.label == "" or item.label == cand.label then
@@ -791,7 +806,10 @@ function M.drawUI(gpu, x, y, w, h)
     local SEP1_ROW   = LIST_END + 1
     local ED_START   = SEP1_ROW + 1
     local FOOT_ROW   = y + h - 1
-    local ERR_ROW    = y + h
+    -- Error sits in the free gap just above the footer separator. y+h is one
+    -- past the last visible row, so an error there is drawn off-screen — which
+    -- is why failures previously showed as "nothing happening".
+    local ERR_ROW    = y + h - 3
 
     -- Clear
     gpu.setBackground(0x000000)
