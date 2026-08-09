@@ -37,6 +37,10 @@ local C_ACT   = 0x002244
 -- ── Constants ─────────────────────────────────────────────────────────────────
 
 local HISTORY_MAX  = 30
+-- Max characters stored per history label. The dashboard clips to the actual
+-- column width, so this only needs to be generous enough not to be the
+-- bottleneck for long GTNH names (e.g. "Molten Maraging Steel 300").
+local HIST_LABEL_MAX = 40
 local VISIBLE_ROWS = 32
 local CRAFT_TIMEOUT = 7200  -- absolute backstop: 2 real hours before declaring dead
 local STALL_WINDOW  = 2400  -- 40 real min (~2 Minecraft days) of no stock movement = stalled
@@ -175,7 +179,7 @@ local function addHistory(label, amount, status)
     _historySeq = _historySeq + 1
     state.history[state.histHead] = {
         id     = _historySeq,
-        label  = unicode.sub(tostring(label), 1, 20),
+        label  = unicode.sub(tostring(label), 1, HIST_LABEL_MAX),
         amount = amount,
         status = status,
         when   = realTimeStr(),
@@ -426,15 +430,18 @@ local function evaluateJob(pending, current, level)
         local okD, done = pcall(function() return pending.job.isDone() end)
         if okD and done then return "done" end
 
-        local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
-        if okC and cancelled then return "cancelled" end
-
         -- hasFailed() returns (failed, reason). In the GTNH 2.9.x AE2 fork this
         -- reliably reports jobs that cannot be fulfilled (e.g. reason "no link"
-        -- when ingredients are missing). Treat it as a failure and cool down so
-        -- we don't hammer an unfulfillable pattern; ingredients may appear later.
+        -- when ingredients are missing). Check it BEFORE isCanceled(): AE
+        -- auto-cancels a failed job, so both flags end up true — checking
+        -- hasFailed first labels ingredient shortages "failed", leaving
+        -- "cancelled" for genuine user cancels (where hasFailed stays false).
+        -- Both paths cool down 5 min before retrying.
         local okF, failed = pcall(function() return pending.job.hasFailed() end)
         if okF and failed then return "failed" end
+
+        local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
+        if okC and cancelled then return "cancelled" end
     end
 
     -- ── Sample current AE state ─────────────────────────────────────────────
