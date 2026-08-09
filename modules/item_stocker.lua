@@ -7,6 +7,13 @@ local os        = require("os")
 local unicode   = require("unicode")
 local ui        = require("lib/ui")
 
+-- collectgarbage is not exposed as a global in some OpenComputers sandboxes
+-- (GTNH 2.9.x among them); calling it directly throws. Use this guarded
+-- wrapper everywhere instead so a missing collectgarbage is a harmless no-op.
+local function gc()
+    if type(collectgarbage) == "function" then collectgarbage("collect") end
+end
+
 local M = {}
 M.id   = "item_stocker"
 M.name = "Item Stocker"
@@ -350,7 +357,7 @@ local function refreshPatterns()
     pcall(migrateStockListKeys)
     pcall(rebuildStockedList)
     -- Free the old craftable userdata refs and any transient garbage
-    collectgarbage("collect")
+    gc()
 end
 
 -- Throttled variant for automatic recovery paths (stall/timeout).
@@ -397,7 +404,7 @@ local _failedCooldown = {}         -- key -> uptime to retry after silent failur
 --   "cancelled"  - user cancelled via the terminal (isCanceled(true))
 --   "stalled"    - job became active but no stock movement for STALL_WINDOW
 --   "timeout"    - absolute backstop CRAFT_TIMEOUT exceeded
---   "failed"     - AE released the job without any stock being delivered
+--   "failed"     - job reported hasFailed() (e.g. "no link" / missing ingredients)
 local function evaluateJob(pending, current, level)
     local now = computer.uptime()
 
@@ -414,27 +421,32 @@ local function evaluateJob(pending, current, level)
         return "done"
     end
 
-    -- Trust isDone()/isCanceled() only when positive.
+    -- Trust isDone()/isCanceled()/hasFailed() only when positive.
     if pending.job then
         local okD, done = pcall(function() return pending.job.isDone() end)
         if okD and done then return "done" end
 
         local okC, cancelled = pcall(function() return pending.job.isCanceled() end)
         if okC and cancelled then return "cancelled" end
+
+        -- hasFailed() returns (failed, reason). In the GTNH 2.9.x AE2 fork this
+        -- reliably reports jobs that cannot be fulfilled (e.g. reason "no link"
+        -- when ingredients are missing). Treat it as a failure and cool down so
+        -- we don't hammer an unfulfillable pattern; ingredients may appear later.
+        local okF, failed = pcall(function() return pending.job.hasFailed() end)
+        if okF and failed then return "failed" end
     end
 
     -- ── Sample current AE state ─────────────────────────────────────────────
-    local computingNow, linkedNow = nil, nil
+    -- This fork's job exposes isComputing() but NOT isLinked(). Latch
+    -- everSeenActive while the job is computing so the "running" promotion and
+    -- stall detector behave once AE starts working on it.
+    local computingNow = nil
     if pending.job then
         local okC, computing = pcall(function() return pending.job.isComputing() end)
         if okC then
             computingNow = computing
             if computing then pending.everSeenActive = true end
-        end
-        local okL, linked = pcall(function() return pending.job.isLinked() end)
-        if okL then
-            linkedNow = linked
-            if linked then pending.everSeenActive = true end
         end
     end
 
@@ -448,17 +460,12 @@ local function evaluateJob(pending, current, level)
     end
 
     -- ── Release detection ───────────────────────────────────────────────────
-    -- If we ever saw the job active and now both signals report false, AE
-    -- has finished processing it. Disambiguate by stock movement:
-    --   stock moved from initial -> "done" (delivery happened)
-    --   no stock movement        -> "failed" (silent rejection; cooldown)
-    if pending.everSeenActive and computingNow == false and linkedNow == false then
-        if current > (pending.initialStock or 0) then
-            return "done"
-        else
-            return "failed"
-        end
-    end
+    -- This fork exposes no isLinked(), and isComputing()==false is ambiguous
+    -- (an actively-crafting job also reports false), so we cannot infer
+    -- "released" from the signals alone. Terminal outcomes are instead covered
+    -- by hasFailed()/isDone()/isCanceled() above and the stock-based completion
+    -- checks (current >= level, peakStock reached). Stall and the absolute
+    -- CRAFT_TIMEOUT remain the backstops below.
 
     -- ── Stall: only meaningful AFTER the job became active ─────────────────
     -- A job queued in AE behind a larger one may legitimately sit idle for
@@ -668,7 +675,7 @@ local function checkAndStock()
     end
 
     -- Reclaim per-cycle garbage (network snapshot, transient closures, etc.)
-    collectgarbage("collect")
+    gc()
 end
 
 -- ── Editor helpers ────────────────────────────────────────────────────────────
