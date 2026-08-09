@@ -824,10 +824,7 @@ function M.drawUI(gpu, x, y, w, h)
     local SEP1_ROW   = LIST_END + 1
     local ED_START   = SEP1_ROW + 1
     local FOOT_ROW   = y + h - 1
-    -- Error sits in the free gap just above the footer separator. Using y+h
-    -- (one past the last visible row) would draw it off-screen — the reason
-    -- errors previously never appeared.
-    local ERR_ROW    = y + h - 3
+    local ERR_ROW    = y + h
 
     -- Clear
     gpu.setBackground(0x000000)
