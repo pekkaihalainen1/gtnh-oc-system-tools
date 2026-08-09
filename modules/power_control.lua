@@ -29,9 +29,17 @@ local state = {
 
 local _redstoneIO  = nil
 local _detector    = nil
+local _getStored   = nil   -- resolved stored-EU getter (bound proxy fn)
+local _getCap      = nil   -- resolved capacity getter  (bound proxy fn)
 local _lastCheck   = 0
 local _prevStored  = nil
 local _prevTime    = nil
+
+-- An adapter on a GT machine (e.g. the LSC) may expose the stored value and
+-- the capacity under any of these names, and NOT as a fixed pair. Resolve each
+-- independently, first match wins.
+local STORED_GETTERS = { "getEUStored", "getStoredEU", "getEnergyStored", "getStored" }
+local CAP_GETTERS    = { "getEUCapacity", "getEUMaxStored", "getMaxEnergyStored", "getCapacity" }
 
 -- ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +62,26 @@ local function findDetector()
         return component.energy_device
     end
     return nil
+end
+
+-- Resolve a stored getter and a capacity getter independently. Returns
+-- true on success; on failure returns false plus a sorted list of the
+-- methods the component *does* expose, so the error is actionable.
+local function resolveEnergyAPI(det)
+    for _, name in ipairs(STORED_GETTERS) do
+        if type(det[name]) == "function" then _getStored = det[name]; break end
+    end
+    for _, name in ipairs(CAP_GETTERS) do
+        if type(det[name]) == "function" then _getCap = det[name]; break end
+    end
+    if _getStored and _getCap then return true end
+
+    local names = {}
+    for name in pairs(det) do
+        if type(det[name]) == "function" then names[#names + 1] = name end
+    end
+    table.sort(names)
+    return false, table.concat(names, ", ")
 end
 
 local function setRedstone(active)
@@ -143,6 +171,11 @@ function M.init(gpu, screenW, screenH)
         return false, "No energy detector found (gt_machine, gt_energydetector, or energy_device)"
     end
 
+    local ok, methods = resolveEnergyAPI(_detector)
+    if not ok then
+        return false, "Energy component has no known getters. Available methods: " .. methods
+    end
+
     setRedstone(false)
     return true
 end
@@ -155,21 +188,12 @@ function M.update()
     _lastCheck = now
 
     local ok, result = pcall(function()
-        local det = _detector
-        local stored, cap
+        local stored = _getStored()
+        local cap    = _getCap()
 
-        if det.getEUStored and det.getEUCapacity then
-            stored = det.getEUStored()
-            cap    = det.getEUCapacity()
-        elseif det.getEnergyStored and det.getMaxEnergyStored then
-            stored = det.getEnergyStored()
-            cap    = det.getMaxEnergyStored()
-        elseif det.getStored and det.getCapacity then
-            stored = det.getStored()
-            cap    = det.getCapacity()
-        else
-            error("Unknown energy detector API")
-        end
+        -- Some GT getters return the value as a string; coerce to number.
+        stored = tonumber(stored) or 0
+        cap    = tonumber(cap)    or 0
 
         state.euStored   = stored or 0
         state.euCapacity = cap    or 0
