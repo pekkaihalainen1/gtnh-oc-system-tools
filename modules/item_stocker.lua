@@ -81,6 +81,13 @@ local _pendingJobs  = {}  -- itemKey -> {job, requestedAt, amount}
                           -- cleared when job finishes, cancels, or times out
 local _epochOffset  = nil -- realUnixTime - computer.uptime() after NTP sync
 
+-- Network fluids, rebuilt each stock cycle (and on pattern refresh). Used to
+-- decide whether a stock entry is a fluid so its amounts render/parse in
+-- L/KL/ML instead of a raw mB integer. AE2FC "drop" items still count via
+-- ui.isDrop; these sets cover real fluids (Drilling Fluid, molten metals, …).
+local _fluidNames   = {}  -- fluid name  -> true
+local _fluidLabels  = {}  -- fluid label -> true
+
 local PATTERN_REFRESH_THROTTLE = 60  -- seconds between automatic pattern refreshes
 local _lastPatternRefresh = -math.huge
 
@@ -137,6 +144,16 @@ end
 -- carry no dependable damage).
 local function nameLabelKey(name, label)
     return tostring(name) .. KEY_SEP .. tostring(label or "")
+end
+
+-- True when a stock entry's amount should render/parse as a fluid volume
+-- (L/KL/ML) rather than a raw integer: AE2FC "drop" items, or anything whose
+-- name/label matches a fluid currently known to the network (see _fluidNames).
+local function isFluidAmount(label, name)
+    if ui.isDrop(label or "") then return true end
+    if name  and _fluidNames[name]   then return true end
+    if label and _fluidLabels[label] then return true end
+    return false
 end
 
 local function clampScroll(cursor, scrollOff, visible)
@@ -369,6 +386,21 @@ local function refreshPatterns()
     -- patterns are (re)loaded. Cheap no-op if already migrated.
     pcall(migrateStockListKeys)
     pcall(rebuildStockedList)
+    -- Populate the fluid identity sets so the editor pretty-prints fluid
+    -- volumes even before the first stock cycle runs (e.g. opening the editor
+    -- straight from the pattern list on load).
+    pcall(function()
+        local fl = state.me.getFluidsInNetwork()
+        if type(fl) ~= "table" then return end
+        local names, labels = {}, {}
+        for _, f in pairs(fl) do
+            if type(f) == "table" then
+                if f.name  then names[f.name]   = true end
+                if f.label then labels[f.label] = true end
+            end
+        end
+        _fluidNames, _fluidLabels = names, labels
+    end)
     -- Free the old craftable userdata refs and any transient garbage
     gc()
 end
@@ -680,6 +712,42 @@ local function checkAndStock()
         items = nil
     end
 
+    -- Fluids live in a separate bucket: getFluidsInNetwork() returns entries
+    -- with `name` (e.g. "molten.steel"), `label` ("Molten Steel"), and
+    -- `amount` in mB. AE2FC fluids (Drilling Fluid, Distilled Water, molten
+    -- metals, …) are NOT items, so the item scans above always report 0 for
+    -- them — which made the limit check (current >= level) never trip and the
+    -- stocker re-request every cycle. Merge fluid amounts in here. The list is
+    -- small (~100 entries) so this bulk call is cheap, unlike getItemsInNetwork.
+    local fluidByName, fluidByLabel = {}, {}
+    local fNames, fLabels = {}, {}
+    local okF, fluids = pcall(function() return state.me.getFluidsInNetwork() end)
+    if okF and type(fluids) == "table" then
+        for _, fl in pairs(fluids) do
+            if type(fl) == "table" then
+                local amt = fl.amount or fl.size or 0
+                if fl.name  then fluidByName[fl.name]   = (fluidByName[fl.name]   or 0) + amt; fNames[fl.name]   = true end
+                if fl.label then fluidByLabel[fl.label] = (fluidByLabel[fl.label] or 0) + amt; fLabels[fl.label] = true end
+            end
+        end
+        -- Publish the fluid identity sets so the display/editor can pretty-print
+        -- fluid volumes. Only overwrite on a good read, so a transient API blip
+        -- doesn't wipe formatting mid-session.
+        _fluidNames, _fluidLabels = fNames, fLabels
+    end
+    -- Only fall back to fluids when the item scan found nothing for this key,
+    -- so a real item can never be double-counted against a like-named fluid.
+    -- Match by fluid name first (unique, collision-free), then by label.
+    for key, _ in pairs(M.config.stockList) do
+        if (inStock[key] or 0) == 0 then
+            local name, _d, label = parseKey(key)
+            local famt = fluidByName[name]
+            if famt == nil and label ~= "" then famt = fluidByLabel[label] end
+            if famt ~= nil then inStock[key] = famt end
+        end
+    end
+    fluids = nil
+
     state.inStock = inStock
 
     -- Build the set of items currently being crafted on busy CPUs, so pending
@@ -744,7 +812,8 @@ end
 
 local function openEditor(key, label)
     local existing = M.config.stockList[key] or {}
-    local isDropItem = ui.isDrop(label or "")
+    local kname = select(1, parseKey(key))
+    local isDropItem = isFluidAmount(label, kname)
     state.editorMode  = true
     state.editorKey   = key
     state.editorLabel = label or key
@@ -938,7 +1007,8 @@ function M.drawUI(gpu, x, y, w, h)
                         end
                     else
                         local cur = state.inStock[item.key] or 0
-                        if ui.isDrop(item.label) then
+                        local iname = select(1, parseKey(item.key))
+                        if isFluidAmount(item.label, iname) then
                             right = ui.formatDrop(cur) .. "/" .. ui.formatDrop(item.level)
                         else
                             right = string.format("%d/%d", cur, item.level)
