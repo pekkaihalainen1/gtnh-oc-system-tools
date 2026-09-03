@@ -8,13 +8,27 @@
 
 local BASE_URL = "https://raw.githubusercontent.com/pekkaihalainen1/gtnh-oc-system-tools/refs/heads/main/"
 
+-- Each entry is {remote, dest}: remote path fetched from BASE_URL, dest path
+-- written under installRoot. The "stock" system's entry point is fetched
+-- from main_stock.lua but written locally as main.lua so autorun/.shrc
+-- wiring (which always targets "main.lua") works unchanged for either system.
 local FILES = {
-    "main.lua",
-    "lib/config.lua",
-    "lib/ui.lua",
-    "modules/dashboard.lua",
-    "modules/power_control.lua",
-    "modules/item_stocker.lua",
+    main = {
+        { "main.lua",                    "main.lua" },
+        { "lib/config.lua",              "lib/config.lua" },
+        { "lib/ui.lua",                  "lib/ui.lua" },
+        { "modules/dashboard.lua",       "modules/dashboard.lua" },
+        { "modules/power_control.lua",   "modules/power_control.lua" },
+        { "modules/item_stocker.lua",    "modules/item_stocker.lua" },
+    },
+    stock = {
+        { "main_stock.lua",              "main.lua" },
+        { "lib/config.lua",              "lib/config.lua" },
+        { "lib/ui.lua",                  "lib/ui.lua" },
+        { "modules/stock_dashboard.lua", "modules/stock_dashboard.lua" },
+        { "modules/history.lua",         "modules/history.lua" },
+        { "modules/item_stocker.lua",    "modules/item_stocker.lua" },
+    },
 }
 
 -- ── Dependencies ─────────────────────────────────────────────────────────────
@@ -215,13 +229,34 @@ end
 io.write("=== GTNH OC System Tools Setup ===\n")
 io.write("Install root: " .. installRoot .. "\n\n")
 
--- Clean existing managed files (not config)
+-- ── System selection ──────────────────────────────────────────────────────────
+
+io.write("Select system to install:\n")
+io.write("  [1] Main   - power control + item/fluid stocking\n")
+io.write("  [2] Stock  - item/fluid stocking only (no power control)\n")
+io.write("Choice [1]: ")
+local choice = (io.read() or ""):gsub("%s+", "")
+local system = (choice == "2") and "stock" or "main"
+io.write("Installing: " .. system .. "\n\n")
+
+local files = FILES[system]
+
+-- Clean existing managed files from EITHER system (not config), so switching
+-- systems on a reinstall doesn't leave stale modules (e.g. power_control.lua
+-- lingering after switching from "main" to "stock").
+local destsToClean = {}
+for _, list in pairs(FILES) do
+    for _, entry in ipairs(list) do
+        destsToClean[entry[2]] = true
+    end
+end
+
 io.write("Cleaning existing files...\n")
-for _, relPath in ipairs(FILES) do
-    local destPath = installRoot .. relPath
-    if filesystem.exists(destPath) then
-        filesystem.remove(destPath)
-        io.write("  Removed " .. relPath .. "\n")
+for destPath in pairs(destsToClean) do
+    local fullPath = installRoot .. destPath
+    if filesystem.exists(fullPath) then
+        filesystem.remove(fullPath)
+        io.write("  Removed " .. destPath .. "\n")
     end
 end
 io.write("\n")
@@ -230,18 +265,19 @@ io.write("\n")
 local ok_count   = 0
 local fail_count = 0
 
-for _, relPath in ipairs(FILES) do
-    local url      = BASE_URL .. relPath
-    local destPath = installRoot .. relPath
+for _, entry in ipairs(files) do
+    local remotePath, destPath = entry[1], entry[2]
+    local url      = BASE_URL .. remotePath
+    local fullPath = installRoot .. destPath
 
-    io.write(string.format("  Downloading %-35s ... ", relPath))
+    io.write(string.format("  Downloading %-35s ... ", destPath))
 
     local body, err = fetch(url)
     if not body then
         io.write("FAILED (" .. err .. ")\n")
         fail_count = fail_count + 1
     else
-        local written, werr = writeFile(destPath, body)
+        local written, werr = writeFile(fullPath, body)
         if not written then
             io.write("FAILED (write: " .. tostring(werr) .. ")\n")
             fail_count = fail_count + 1

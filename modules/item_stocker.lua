@@ -314,6 +314,7 @@ local function rebuildStockedList()
             label    = entry.label or key,
             level    = entry.level or 0,
             perCycle = entry.perCycle or 0,
+            featured = entry.featured or false,
         })
     end
     table.sort(state.stockedList, function(a, b)
@@ -441,6 +442,50 @@ local FAILED_COOLDOWN = 300        -- seconds after AE silently dropped a craft
 
 local _cancelCooldown = {}         -- key -> uptime to retry after user cancel
 local _failedCooldown = {}         -- key -> uptime to retry after silent failure
+
+-- Coarse per-item state for dashboard display (stock_dashboard module):
+--   "ok"      - at/above target, nothing pending
+--   "active"  - below target, a craft is queued or running
+--   "problem" - below target, in cooldown after a recent cancel/silent failure
+--   "idle"    - below target, no pending job and no recent failure
+-- Reuses the same tracking tables processItem() already maintains, so no
+-- extra bookkeeping is needed.
+local function getItemState(key, entry, current)
+    if current >= (entry.level or 0) then return "ok" end
+    if _pendingJobs[key] then return "active" end
+    local now = computer.uptime()
+    if (_cancelCooldown[key] and now < _cancelCooldown[key])
+    or (_failedCooldown[key] and now < _failedCooldown[key]) then
+        return "problem"
+    end
+    return "idle"
+end
+
+-- Public accessor for the stock_dashboard module (Stock Maintainer system):
+-- one row per item/fluid the user marked "featured" ([F] in the STOCKED
+-- list), with current stock, target level, and coarse state for the status
+-- square.
+function M.getFeaturedStock()
+    local result = {}
+    for key, entry in pairs(M.config.stockList) do
+        if entry.featured then
+            local current = state.inStock[key] or 0
+            local level   = entry.level or 0
+            local name    = parseKey(key)
+            table.insert(result, {
+                key     = key,
+                label   = entry.label or key,
+                current = current,
+                level   = level,
+                percent = level > 0 and math.min(1, current / level) or 0,
+                isFluid = isFluidAmount(entry.label, name),
+                state   = getItemState(key, entry, current),
+            })
+        end
+    end
+    table.sort(result, function(a, b) return a.label:lower() < b.label:lower() end)
+    return result
+end
 
 -- evaluateJob returns one of:
 --   nil          - still in flight, leave pending in place
@@ -992,7 +1037,8 @@ function M.drawUI(gpu, x, y, w, h)
                     gpu.fill(px, r, pw, 1, " ")
                 end
                 if panel == "stocked" then
-                    local marker  = isCursor and "\xE2\x96\xB6 " or "  "  -- "▶ "
+                    local star    = item.featured and "\xE2\x98\x85" or " "  -- "★"
+                    local marker  = star .. (isCursor and "\xE2\x96\xB6 " or "  ")  -- "▶ "
                     local pending = _pendingJobs[item.key]
                     local right
                     if pending then
@@ -1014,11 +1060,11 @@ function M.drawUI(gpu, x, y, w, h)
                             right = string.format("%d/%d", cur, item.level)
                         end
                     end
-                    local lw   = pw - #marker - #right - 1
+                    local lw   = pw - unicode.len(marker) - #right - 1
                     local lbl  = unicode.sub(item.label, 1, lw)
                     local line = marker .. lbl .. string.rep(" ", lw - unicode.len(lbl)) .. " " .. right
                     gpu.setForeground(pending and C_NEG or (isCursor and C_LABEL or C_VALUE))
-                    gpu.set(px, r, line:sub(1, pw))
+                    gpu.set(px, r, line:sub(1, pw + (#marker - unicode.len(marker))))
                 else
                     -- patterns panel
                     local tracked = M.config.stockList[item.key] ~= nil
@@ -1104,7 +1150,7 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.fill(x, FOOT_ROW - 1, w, 1, "\xE2\x94\x80")
     gpu.setForeground(C_DIM)
     gpu.set(x + 2, FOOT_ROW,
-        "[Up/Down] Navigate  [Left/Right] Switch  [Enter] Edit  [Del] Clear pending  [Type] Search  [Esc] Clear  [Home] Refresh  [Q] Quit")
+        "[Up/Down] Navigate  [Left/Right] Switch  [Enter] Edit  [F] Feature  [Del] Clear pending  [Type] Search  [Esc] Clear  [Home] Refresh  [Q] Quit")
 
     -- ── Error overlay ─────────────────────────────────────────────────────────
     if state.error then
@@ -1195,6 +1241,16 @@ function M.handleKey(char, code)
     elseif code == keyboard.keys.delete then
         if state.activePanel == "stocked" and state.stockedList[state.cursorStk] then
             _pendingJobs[state.stockedList[state.cursorStk].key] = nil
+        end
+    elseif (char == 102 or char == 70) and state.activePanel == "stocked" then -- 'f'/'F'
+        local item = state.stockedList[state.cursorStk]
+        if item then
+            local entry = M.config.stockList[item.key]
+            if entry then
+                entry.featured = not entry.featured
+                saveMyConfig()
+                rebuildStockedList()
+            end
         end
     elseif code == keyboard.keys.escape then
         if state.searchStr ~= "" then
