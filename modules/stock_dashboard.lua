@@ -43,6 +43,18 @@ local STATE_COLOR = {
     idle    = 0x666666,  -- gray:   below target, nothing happening yet
 }
 
+-- Bar fill color reflects how close current stock is to target, independent
+-- of the crafting-state status square.
+local function barColor(percent)
+    if percent >= 0.9 then
+        return 0x00DD44  -- green: at/near target
+    elseif percent >= 0.5 then
+        return 0xFFAA00  -- amber: getting there
+    else
+        return 0xFF2222  -- red: far below target
+    end
+end
+
 -- ── Column layout ─────────────────────────────────────────────────────────────
 
 local LABEL_W   = 20
@@ -125,7 +137,7 @@ function M.drawUI(gpu, x, y, w, h)
         gpu.setForeground(C_DIM)
         gpu.set(barX, r, "[")
         if filled > 0 then
-            gpu.setBackground(STATE_COLOR[item.state] or C_DIM)
+            gpu.setBackground(barColor(item.percent))
             gpu.fill(barX + 1, r, filled, 1, " ")
         end
         if filled < barW then

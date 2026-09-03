@@ -1037,7 +1037,7 @@ function M.drawUI(gpu, x, y, w, h)
                     gpu.fill(px, r, pw, 1, " ")
                 end
                 if panel == "stocked" then
-                    local star    = item.featured and "\xE2\x98\x85" or " "  -- "★"
+                    local star    = item.featured and "*" or " "
                     local marker  = star .. (isCursor and "\xE2\x96\xB6 " or "  ")  -- "▶ "
                     local pending = _pendingJobs[item.key]
                     local right
