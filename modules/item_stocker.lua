@@ -21,6 +21,8 @@ M.name = "Item Stocker"
 M.config = {
     checkInterval = 10,
     stockList     = {},  -- [itemKey] = {level, perCycle, label}
+    roundRobin    = false, -- rotate item processing order each cycle so no
+                           -- single item permanently hogs free crafting CPUs
 }
 
 -- ── Colors ────────────────────────────────────────────────────────────────────
@@ -74,6 +76,8 @@ local state = {
     error        = nil,
     inStock      = {},  -- itemKey -> current count, updated each check cycle
     crafting     = {},  -- nameLabelKey -> true for items on busy CPUs this cycle
+    availableCpus = nil, -- free (non-busy) crafting CPUs this cycle; nil = unknown (getCpus failed)
+    rrIdx        = 0,    -- round-robin rotation offset into stockedList, advances each cycle
 }
 
 local _patsByKey    = {}  -- itemKey -> craftable object cache
@@ -575,8 +579,11 @@ local function evaluateJob(pending, current, level)
 end
 
 -- Process a single stocked item. Isolated from other items so a thrown
--- error here cannot block siblings. Returns nothing meaningful.
-local function processItem(key, entry, current)
+-- error here cannot block siblings. cpuBudget (optional) is a shared
+-- {available = n} table tracking free crafting CPUs left this cycle; nil
+-- means CPU count could not be determined this cycle (getCpus failed), in
+-- which case the CPU gate is skipped entirely rather than blocking crafts.
+local function processItem(key, entry, current, cpuBudget)
     if not (entry.level and entry.level > 0) then return end
     local now = computer.uptime()
 
@@ -638,6 +645,13 @@ local function processItem(key, entry, current)
     _cancelCooldown[key] = nil
     _failedCooldown[key] = nil
 
+    -- CPU gate: only submit a new craft request if a crafting CPU is free.
+    -- Skip otherwise and retry on the next check cycle rather than queuing
+    -- a request AE has nowhere to run yet.
+    if cpuBudget and cpuBudget.available ~= nil and cpuBudget.available <= 0 then
+        return
+    end
+
     local deficit = entry.level - current
     local amount  = (entry.perCycle and entry.perCycle > 0)
                     and math.min(deficit, entry.perCycle)
@@ -666,6 +680,9 @@ local function processItem(key, entry, current)
     end
 
     if ok and job ~= nil then
+        if cpuBudget and cpuBudget.available ~= nil then
+            cpuBudget.available = cpuBudget.available - 1
+        end
         local hid = addHistory(entry.label or key, amount, "queued")
         _pendingJobs[key] = {
             job            = job,
@@ -802,16 +819,23 @@ local function checkAndStock()
     -- are inputs, not outputs, so we skip them. getCpus is best-effort: any
     -- failure just yields an empty set (items fall back to stock-based state).
     local crafting = {}
+    -- Also count free (non-busy) CPUs here so processItem can gate new craft
+    -- submissions on actual availability instead of queuing blind.
+    local totalCpus, busyCpus = 0, 0
     local okCpu, cpus = pcall(function() return state.me.getCpus() end)
     if okCpu and type(cpus) == "table" then
         for _, e in pairs(cpus) do
-            if type(e) == "table" and e.busy and e.cpu then
-                for _, method in ipairs({ "activeItems", "pendingItems" }) do
-                    local okI, items = pcall(function() return e.cpu[method]() end)
-                    if okI and type(items) == "table" then
-                        for _, it in pairs(items) do
-                            if type(it) == "table" and it.name then
-                                crafting[nameLabelKey(it.name, it.label)] = true
+            if type(e) == "table" then
+                totalCpus = totalCpus + 1
+                if e.busy then busyCpus = busyCpus + 1 end
+                if e.busy and e.cpu then
+                    for _, method in ipairs({ "activeItems", "pendingItems" }) do
+                        local okI, items = pcall(function() return e.cpu[method]() end)
+                        if okI and type(items) == "table" then
+                            for _, it in pairs(items) do
+                                if type(it) == "table" and it.name then
+                                    crafting[nameLabelKey(it.name, it.label)] = true
+                                end
                             end
                         end
                     end
@@ -820,15 +844,53 @@ local function checkAndStock()
         end
     end
     state.crafting = crafting
+    -- nil (unknown) when getCpus() itself failed, so the CPU gate in
+    -- processItem is skipped rather than blocking every craft forever.
+    state.availableCpus = okCpu and (totalCpus - busyCpus) or nil
+
+    local cpuBudget = { available = state.availableCpus }
+
+    -- Item processing order: plain pairs() iteration by default (arbitrary
+    -- but stable per table), or a rotating order when roundRobin is enabled
+    -- so free CPUs (limited by cpuBudget above) get distributed to a
+    -- different item first each cycle instead of always the same ones.
+    local orderedKeys = nil
+    if M.config.roundRobin then
+        orderedKeys = {}
+        for _, item in ipairs(state.stockedList) do
+            orderedKeys[#orderedKeys + 1] = item.key
+        end
+        local n = #orderedKeys
+        if n > 0 then
+            state.rrIdx = state.rrIdx % n
+            local rotated = {}
+            for i = 1, n do
+                rotated[i] = orderedKeys[((state.rrIdx + i - 1) % n) + 1]
+            end
+            orderedKeys = rotated
+            state.rrIdx = state.rrIdx + 1
+        end
+    end
 
     -- Isolate each item: a thrown error processing one must not prevent
     -- the others from being processed in the same cycle.
-    for key, entry in pairs(M.config.stockList) do
+    local function runItem(key, entry)
         local current = inStock[key] or 0
-        local ok, err = pcall(processItem, key, entry, current)
+        local ok, err = pcall(processItem, key, entry, current, cpuBudget)
         if not ok then
             addHistory(entry.label or key, 0, "err")
             _pendingJobs[key] = nil  -- prevent permanent block on a bad job
+        end
+    end
+
+    if orderedKeys then
+        for _, key in ipairs(orderedKeys) do
+            local entry = M.config.stockList[key]
+            if entry then runItem(key, entry) end
+        end
+    else
+        for key, entry in pairs(M.config.stockList) do
+            runItem(key, entry)
         end
     end
 
@@ -998,6 +1060,23 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.set(x + 1, headerRow, "STOCKED")
     gpu.set(colBX, headerRow, string.format("PATTERNS (%d)", #state.filteredPats))
 
+    -- Round-robin toggle + free-CPU count, right-aligned in the STOCKED
+    -- header. Drop the CPU count, then the whole indicator, on screens too
+    -- narrow to fit it without overlapping the "STOCKED" label.
+    local minInfoX = x + 1 + unicode.len("STOCKED") + 1
+    local rrStr    = "RR:" .. (M.config.roundRobin and "ON" or "OFF")
+    local cpuStr   = state.availableCpus and (" CPU:" .. state.availableCpus) or ""
+    local infoStr  = rrStr .. cpuStr
+    local infoX    = x + colAW - unicode.len(infoStr)
+    if infoX < minInfoX then
+        infoStr = rrStr
+        infoX   = x + colAW - unicode.len(infoStr)
+    end
+    if infoX >= minInfoX then
+        gpu.setForeground(M.config.roundRobin and C_POS or C_DIM)
+        gpu.set(infoX, headerRow, infoStr)
+    end
+
     -- Single vertical separator
     gpu.setForeground(C_SEP)
     gpu.fill(colBX - 1, y + 2, 1, h - 14, "\xE2\x94\x82")
@@ -1150,7 +1229,7 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.fill(x, FOOT_ROW - 1, w, 1, "\xE2\x94\x80")
     gpu.setForeground(C_DIM)
     gpu.set(x + 2, FOOT_ROW,
-        "[Up/Down] Navigate  [Left/Right] Switch  [Enter] Edit  [F] Feature  [Del] Clear pending  [Type] Search  [Esc] Clear  [Home] Refresh  [Q] Quit")
+        "[Up/Down] Navigate  [Left/Right] Switch  [Enter] Edit  [F] Feature  [R] Round-robin  [Del] Clear pending  [Type] Search  [Esc] Clear  [Home] Refresh  [Q] Quit")
 
     -- ── Error overlay ─────────────────────────────────────────────────────────
     if state.error then
@@ -1252,6 +1331,9 @@ function M.handleKey(char, code)
                 rebuildStockedList()
             end
         end
+    elseif (char == 114 or char == 82) and state.activePanel == "stocked" then -- 'r'/'R'
+        M.config.roundRobin = not M.config.roundRobin
+        saveMyConfig()
     elseif code == keyboard.keys.escape then
         if state.searchStr ~= "" then
             state.searchStr = ""
