@@ -21,8 +21,9 @@ M.name = "Item Stocker"
 M.config = {
     checkInterval = 10,
     stockList     = {},  -- [itemKey] = {level, perCycle, label}
-    roundRobin    = false, -- rotate item processing order each cycle so no
-                           -- single item permanently hogs free crafting CPUs
+    roundRobin    = false, -- prioritize whichever stocked item has gone longest
+                           -- without receiving a crafting CPU, so a fast-cycling
+                           -- item can't starve a slow one out of its fair share
 }
 
 -- ── Colors ────────────────────────────────────────────────────────────────────
@@ -77,7 +78,8 @@ local state = {
     inStock      = {},  -- itemKey -> current count, updated each check cycle
     crafting     = {},  -- nameLabelKey -> true for items on busy CPUs this cycle
     availableCpus = nil, -- free (non-busy) crafting CPUs this cycle; nil = unknown (getCpus failed)
-    rrIdx        = 0,    -- round-robin rotation offset into stockedList, advances each cycle
+    lastServed   = {},   -- itemKey -> uptime() a craft request was last submitted for it;
+                         -- drives the round-robin fairness order (oldest served first)
 }
 
 local _patsByKey    = {}  -- itemKey -> craftable object cache
@@ -683,6 +685,7 @@ local function processItem(key, entry, current, cpuBudget)
         if cpuBudget and cpuBudget.available ~= nil then
             cpuBudget.available = cpuBudget.available - 1
         end
+        state.lastServed[key] = now
         local hid = addHistory(entry.label or key, amount, "queued")
         _pendingJobs[key] = {
             job            = job,
@@ -851,25 +854,45 @@ local function checkAndStock()
     local cpuBudget = { available = state.availableCpus }
 
     -- Item processing order: plain pairs() iteration by default (arbitrary
-    -- but stable per table), or a rotating order when roundRobin is enabled
-    -- so free CPUs (limited by cpuBudget above) get distributed to a
-    -- different item first each cycle instead of always the same ones.
+    -- but stable per table), or a fairness order when roundRobin is enabled.
+    -- Items currently eligible for a NEW craft request (below level, no job
+    -- already pending, off cooldown) are sorted oldest-served-first, so
+    -- whichever eligible item has gone longest without actually getting a
+    -- crafting CPU wins the next free slot in cpuBudget. This is deliberately
+    -- based on lastServed rather than list position: a fixed rotation offset
+    -- only rotates turn ORDER, but items with short craft times cycle back
+    -- through "eligible" far more often than slow ones, so they keep re-
+    -- entering the competition and starve the slow item out of its share even
+    -- though the rotation is nominally fair. Sorting by "actually served
+    -- longest ago" fixes that directly. Items not currently eligible (already
+    -- at level, already pending, or in cooldown) don't compete for cpuBudget
+    -- at all, so their relative order doesn't matter.
     local orderedKeys = nil
     if M.config.roundRobin then
-        orderedKeys = {}
+        local now = computer.uptime()
+        local eligible, rest = {}, {}
         for _, item in ipairs(state.stockedList) do
-            orderedKeys[#orderedKeys + 1] = item.key
-        end
-        local n = #orderedKeys
-        if n > 0 then
-            state.rrIdx = state.rrIdx % n
-            local rotated = {}
-            for i = 1, n do
-                rotated[i] = orderedKeys[((state.rrIdx + i - 1) % n) + 1]
+            local entry = M.config.stockList[item.key]
+            local isEligible = false
+            if entry and entry.level and entry.level > 0 and not _pendingJobs[item.key] then
+                local current = inStock[item.key] or 0
+                if current < entry.level
+                and not (_cancelCooldown[item.key] and now < _cancelCooldown[item.key])
+                and not (_failedCooldown[item.key] and now < _failedCooldown[item.key]) then
+                    isEligible = true
+                end
             end
-            orderedKeys = rotated
-            state.rrIdx = state.rrIdx + 1
+            if isEligible then
+                eligible[#eligible + 1] = item.key
+            else
+                rest[#rest + 1] = item.key
+            end
         end
+        table.sort(eligible, function(a, b)
+            return (state.lastServed[a] or -1) < (state.lastServed[b] or -1)
+        end)
+        orderedKeys = eligible
+        for _, k in ipairs(rest) do orderedKeys[#orderedKeys + 1] = k end
     end
 
     -- Isolate each item: a thrown error processing one must not prevent
