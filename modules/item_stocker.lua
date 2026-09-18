@@ -713,7 +713,7 @@ local function checkAndStock()
     local inStock = {}
 
     if _useFilteredScan ~= false then
-        local allOk = true
+        local anyOk, anyFail = false, false
         for key, _ in pairs(M.config.stockList) do
             local name, damage, label = parseKey(key)
             -- Filter by NAME only. Keys built from craftables carry no real
@@ -724,29 +724,41 @@ local function checkAndStock()
             local ok, result = pcall(function()
                 return state.me.getItemsInNetwork({name = name})
             end)
-            if not ok or type(result) ~= "table" then
-                allOk = false
-                break
-            end
-            -- ALWAYS filter by label in our own code: the AE2 filter may
-            -- ignore unknown keys, so multiple NBT-variants (e.g., AE2FC
-            -- drops) can still come back. Skip mismatches explicitly.
-            local total = 0
-            for _, item in pairs(result) do
-                if type(item) == "table" and item.name == name then
-                    if label == "" or item.label == label then
-                        total = total + (item.size or 0)
+            if ok and type(result) == "table" then
+                anyOk = true
+                -- ALWAYS filter by label in our own code: the AE2 filter may
+                -- ignore unknown keys, so multiple NBT-variants (e.g., AE2FC
+                -- drops) can still come back. Skip mismatches explicitly.
+                local total = 0
+                for _, item in pairs(result) do
+                    if type(item) == "table" and item.name == name then
+                        if label == "" or item.label == label then
+                            total = total + (item.size or 0)
+                        end
                     end
                 end
+                inStock[key] = total
+            else
+                -- Leave this one key's inStock unset for this cycle (the
+                -- fluid fallback below still gets a chance, otherwise it
+                -- reads as 0 until the next cycle retries it). A single
+                -- item's transient failure (AE lag, a momentarily-missing
+                -- pattern) must not poison every other item's count or
+                -- permanently disable the fast per-item path for the whole
+                -- stock list — that previously made an entire large base
+                -- report 0 stock forever after one bad response.
+                anyFail = true
             end
-            inStock[key] = total
             result = nil
         end
-        if allOk then
+        -- Only conclude this ME component doesn't support filtered queries
+        -- at all when EVERY key failed. Any success at all means filtering
+        -- works here, so keep using it (and keep retrying failed keys next
+        -- cycle) instead of falling back to a bulk scan.
+        if anyOk then
             _useFilteredScan = true
-        else
+        elseif anyFail then
             _useFilteredScan = false
-            inStock = {}
         end
     end
 
@@ -761,7 +773,14 @@ local function checkAndStock()
             wantedByName[n] = wantedByName[n] or {}
             table.insert(wantedByName[n], { key = key, label = l })
         end
-        local items = state.me.getItemsInNetwork() or {}
+        local okBulk, items = pcall(function() return state.me.getItemsInNetwork() end)
+        if not okBulk or type(items) ~= "table" then
+            -- A nil/failed bulk read must surface as a cycle error, not get
+            -- coerced into "the network has 0 items" — that silently zeroed
+            -- every stocked item's count on a large base where the bulk
+            -- (unfiltered) call fails while filtered per-item calls work.
+            error("bulk getItemsInNetwork() failed: " .. tostring(items))
+        end
         for _, item in pairs(items) do
             if type(item) == "table" and item.name then
                 local candidates = wantedByName[item.name]
