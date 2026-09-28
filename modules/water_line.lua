@@ -153,6 +153,15 @@ end
 -- Strip Minecraft "§x" color codes, then search EVERY line for a label
 -- substring instead of trusting a fixed line index. This is what makes
 -- reading survive a GT version bumping/reordering sensor lines.
+--
+-- On this GTNH build getSensorInformation() returns raw, UNTRANSLATED lang
+-- keys joined with "\": e.g.
+--   "GT5U.infodata.purification_unit_base.success_chance\100%"
+-- instead of the localized "Success chance: 100%" the original tool (and a
+-- plain text search) expects. Handle both: if a line contains "\", split it
+-- into key + value parts and match patterns against the key; otherwise fall
+-- back to the old "search the human-readable text" behavior in case a future
+-- GTNH build (or a different multiblock) does have proper translations.
 
 local function stripColor(s)
     return (s:gsub("§.", ""))
@@ -161,11 +170,29 @@ end
 local function findSensorNumber(sensorLines, patterns)
     if type(sensorLines) ~= "table" then return nil end
     for _, line in ipairs(sensorLines) do
-        local clean = stripColor(line):lower()
-        for _, pat in ipairs(patterns) do
-            if clean:find(pat, 1, true) then
-                local numStr = clean:gsub(",", ""):match("(%d+%.?%d*)")
-                if numStr then return tonumber(numStr) end
+        local text = tostring(line)
+        if text:find("\\", 1, true) then
+            local parts = {}
+            for part in text:gmatch("[^\\]+") do
+                parts[#parts + 1] = part
+            end
+            local key = (parts[1] or ""):lower()
+            for _, pat in ipairs(patterns) do
+                if key:find(pat, 1, true) then
+                    local raw = parts[#parts]
+                    if raw then
+                        local numStr = raw:gsub("%%", ""):gsub(",", ""):match("(%-?%d+%.?%d*)")
+                        if numStr then return tonumber(numStr) end
+                    end
+                end
+            end
+        else
+            local clean = stripColor(text):lower()
+            for _, pat in ipairs(patterns) do
+                if clean:find(pat, 1, true) then
+                    local numStr = clean:gsub(",", ""):match("(%d+%.?%d*)")
+                    if numStr then return tonumber(numStr) end
+                end
             end
         end
     end
@@ -227,12 +254,11 @@ end
 local T3_REQUIRED = 900000  -- mB of Polyaluminium Chloride required per cycle
 
 local t3 = {
-    ready               = false,
-    controller          = nil,
-    transposer          = nil,
-    state               = "idle",  -- idle | work | waitEnd
-    disabledForShortage = false,
-    sensor              = {},
+    ready      = false,
+    controller = nil,
+    transposer = nil,
+    state      = "idle",  -- idle | work | waitEnd
+    sensor     = {},
 }
 
 local function t3Init()
@@ -244,7 +270,7 @@ local function t3Init()
 end
 
 local function t3DoWork()
-    local currentCount = findSensorNumber(t3.sensor, { "polyaluminium chloride consumed" })
+    local currentCount = findSensorNumber(t3.sensor, { "flocculation.consumed", "polyaluminium chloride consumed" })
     if currentCount ~= nil and currentCount >= T3_REQUIRED then
         return
     end
@@ -260,7 +286,6 @@ local function t3DoWork()
 
     if fluidInTank.amount < T3_REQUIRED then
         pcall(t3.controller.setWorkAllowed, false)
-        t3.disabledForShortage = true
         warnOnce("t3", "[T3] Not enough Polyaluminium Chloride for craft, pausing until restocked")
         countToAdd = fluidInTank.amount - (fluidInTank.amount % 100000)
     end
@@ -273,15 +298,21 @@ local function t3DoWork()
     end
 end
 
+-- Checks the multiblock's REAL isWorkAllowed() state rather than an in-memory
+-- "we disabled it" flag: isWorkAllowed() is a property of the in-game block,
+-- so a shortage-disable from a previous run of this program (or a previous,
+-- buggier version of it) survives a restart even though our own local state
+-- does not. Gating recovery on our own flag meant a disable from before this
+-- program last started could never self-heal.
 local function t3TryRecover()
-    if not t3.disabledForShortage then return end
+    local okW, workAllowed = pcall(t3.controller.isWorkAllowed)
+    if not okW or workAllowed ~= false then return end
     local side, tank = locateFluidSide(t3.transposer, "polyaluminiumchloride")
     if not side then return end
     local fluidInTank = t3.transposer.getFluidInTank(side, tank)
     if fluidInTank and fluidInTank.amount >= T3_REQUIRED then
         local okE = pcall(t3.controller.setWorkAllowed, true)
         if okE then
-            t3.disabledForShortage = false
             _lastWarn.t3 = nil
             addLog("[T3] Polyaluminium Chloride restocked, controller re-enabled", "info")
         end
@@ -336,7 +367,7 @@ local function t3StatusText()
     if okW and workAllowed == false then return "Controller disabled (low stock)", C_NEG end
     local okH, hasWork = pcall(t3.controller.hasWork)
     if not (okH and hasWork) then return "Wait cycle", C_DIM end
-    local successChance = findSensorNumber(t3.sensor, { "success chance" })
+    local successChance = findSensorNumber(t3.sensor, { "success_chance", "success chance" })
     local successStr = successChance and string.format("%d%%", successChance) or "N/A (press D)"
     return string.format("State: [%s]  Success: [%s]", t3.state, successStr), C_POS
 end
@@ -344,13 +375,12 @@ end
 -- ── T4: pH Neutralized Water (Grade 4) ────────────────────────────────────────
 
 local t4 = {
-    ready                = false,
-    controller           = nil,
-    acidTransposer       = nil,
-    hydroxideTransposer  = nil,
-    state                = "idle",  -- idle | work | waitEnd
-    disabledForShortage  = false,
-    sensor               = {},
+    ready               = false,
+    controller          = nil,
+    acidTransposer      = nil,
+    hydroxideTransposer = nil,
+    state               = "idle",  -- idle | work | waitEnd
+    sensor              = {},
 }
 
 local function t4Init()
@@ -368,7 +398,6 @@ local function t4PutSodiumHydroxide(count)
     local side, slot = locateItemSide(t4.hydroxideTransposer, "sodium hydroxide dust")
     if not side then
         pcall(t4.controller.setWorkAllowed, false)
-        t4.disabledForShortage = true
         warnOnce("t4hydrox", "[T4] Could not find Sodium Hydroxide Dust on the configured transposer")
         return
     end
@@ -377,7 +406,6 @@ local function t4PutSodiumHydroxide(count)
         local okT, result = pcall(t4.hydroxideTransposer.transferItem, side, sides.bottom, n)
         if not okT or result ~= n then
             pcall(t4.controller.setWorkAllowed, false)
-            t4.disabledForShortage = true
             warnOnce("t4hydrox", "[T4] Not enough Sodium Hydroxide Dust for craft, pausing until restocked")
             break
         end
@@ -388,7 +416,6 @@ local function t4PutHydrochloricAcid(count)
     local side, tank = locateFluidSide(t4.acidTransposer, "hydrochloricacid")
     if not side then
         pcall(t4.controller.setWorkAllowed, false)
-        t4.disabledForShortage = true
         warnOnce("t4acid", "[T4] Could not find Hydrochloric Acid on the configured transposer")
         return
     end
@@ -396,13 +423,12 @@ local function t4PutHydrochloricAcid(count)
     local okT, _, result = pcall(t4.acidTransposer.transferFluid, side, sides.bottom, amount, tank)
     if not okT or result ~= amount then
         pcall(t4.controller.setWorkAllowed, false)
-        t4.disabledForShortage = true
         warnOnce("t4acid", "[T4] Not enough Hydrochloric Acid for craft, pausing until restocked")
     end
 end
 
 local function t4DoWork()
-    local phValue = findSensorNumber(t4.sensor, { "ph value", "current ph", "ph level" })
+    local phValue = findSensorNumber(t4.sensor, { "ph_adjustment.ph", "ph value", "current ph", "ph level" })
     if phValue == nil then
         warnOnce("t4ph", "[T4] Could not read pH value from sensor info - press [D] to view raw sensor lines")
         return
@@ -419,14 +445,17 @@ local function t4DoWork()
     end
 end
 
+-- See t3TryRecover's comment: gate on the multiblock's real isWorkAllowed()
+-- state, not an in-memory flag, so a shortage-disable from a previous run
+-- can still self-heal after a restart.
 local function t4TryRecover()
-    if not t4.disabledForShortage then return end
+    local okW, workAllowed = pcall(t4.controller.isWorkAllowed)
+    if not okW or workAllowed ~= false then return end
     local acidSide  = locateFluidSide(t4.acidTransposer, "hydrochloricacid")
     local hydroxSide = locateItemSide(t4.hydroxideTransposer, "sodium hydroxide dust")
     if acidSide and hydroxSide then
         local okE = pcall(t4.controller.setWorkAllowed, true)
         if okE then
-            t4.disabledForShortage = false
             _lastWarn.t4acid   = nil
             _lastWarn.t4hydrox = nil
             addLog("[T4] Reagents restocked, controller re-enabled", "info")
@@ -483,9 +512,9 @@ local function t4StatusText()
     if okW and workAllowed == false then return "Controller disabled (low stock)", C_NEG end
     local okH, hasWork = pcall(t4.controller.hasWork)
     if not (okH and hasWork) then return "Wait cycle", C_DIM end
-    local successChance = findSensorNumber(t4.sensor, { "success chance" })
+    local successChance = findSensorNumber(t4.sensor, { "success_chance", "success chance" })
     local successStr = successChance and string.format("%d%%", successChance) or "N/A (press D)"
-    local phValue = findSensorNumber(t4.sensor, { "ph value", "current ph", "ph level" })
+    local phValue = findSensorNumber(t4.sensor, { "ph_adjustment.ph", "ph value", "current ph", "ph level" })
     local phStr = phValue and string.format("  pH: %.2f", phValue) or "  pH: ? (press D)"
     return string.format("State: [%s]  Success: [%s]%s", t4.state, successStr, phStr), C_POS
 end
