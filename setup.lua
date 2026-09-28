@@ -9,9 +9,10 @@
 local BASE_URL = "https://raw.githubusercontent.com/pekkaihalainen1/gtnh-oc-system-tools/refs/heads/main/"
 
 -- Each entry is {remote, dest}: remote path fetched from BASE_URL, dest path
--- written under installRoot. The "stock" system's entry point is fetched
--- from main_stock.lua but written locally as main.lua so autorun/.shrc
--- wiring (which always targets "main.lua") works unchanged for either system.
+-- written under installRoot. The "stock" and "water" systems' entry points
+-- are fetched from main_stock.lua / main_water.lua but written locally as
+-- main.lua so autorun/.shrc wiring (which always targets "main.lua") works
+-- unchanged for any system.
 local FILES = {
     main = {
         { "main.lua",                    "main.lua" },
@@ -28,6 +29,12 @@ local FILES = {
         { "modules/stock_dashboard.lua", "modules/stock_dashboard.lua" },
         { "modules/history.lua",         "modules/history.lua" },
         { "modules/item_stocker.lua",    "modules/item_stocker.lua" },
+    },
+    water = {
+        { "main_water.lua",              "main.lua" },
+        { "lib/config.lua",              "lib/config.lua" },
+        { "lib/ui.lua",                  "lib/ui.lua" },
+        { "modules/water_line.lua",      "modules/water_line.lua" },
     },
 }
 
@@ -234,9 +241,10 @@ io.write("Install root: " .. installRoot .. "\n\n")
 io.write("Select system to install:\n")
 io.write("  [1] Main   - power control + item/fluid stocking\n")
 io.write("  [2] Stock  - item/fluid stocking only (no power control)\n")
+io.write("  [3] Water  - GT water purification line automation (grade 3/4)\n")
 io.write("Choice [1]: ")
 local choice = (io.read() or ""):gsub("%s+", "")
-local system = (choice == "2") and "stock" or "main"
+local system = (choice == "2") and "stock" or (choice == "3") and "water" or "main"
 io.write("Installing: " .. system .. "\n\n")
 
 local files = FILES[system]
