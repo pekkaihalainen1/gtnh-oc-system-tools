@@ -336,8 +336,9 @@ local function t3StatusText()
     if okW and workAllowed == false then return "Controller disabled (low stock)", C_NEG end
     local okH, hasWork = pcall(t3.controller.hasWork)
     if not (okH and hasWork) then return "Wait cycle", C_DIM end
-    local successChance = findSensorNumber(t3.sensor, { "success chance" }) or 0
-    return string.format("State: [%s]  Success: [%d%%]", t3.state, successChance), C_POS
+    local successChance = findSensorNumber(t3.sensor, { "success chance" })
+    local successStr = successChance and string.format("%d%%", successChance) or "N/A (press D)"
+    return string.format("State: [%s]  Success: [%s]", t3.state, successStr), C_POS
 end
 
 -- ── T4: pH Neutralized Water (Grade 4) ────────────────────────────────────────
@@ -482,10 +483,11 @@ local function t4StatusText()
     if okW and workAllowed == false then return "Controller disabled (low stock)", C_NEG end
     local okH, hasWork = pcall(t4.controller.hasWork)
     if not (okH and hasWork) then return "Wait cycle", C_DIM end
-    local successChance = findSensorNumber(t4.sensor, { "success chance" }) or 0
+    local successChance = findSensorNumber(t4.sensor, { "success chance" })
+    local successStr = successChance and string.format("%d%%", successChance) or "N/A (press D)"
     local phValue = findSensorNumber(t4.sensor, { "ph value", "current ph", "ph level" })
-    local phStr = phValue and string.format("  pH: %.2f", phValue) or "  pH: ?"
-    return string.format("State: [%s]  Success: [%d%%]%s", t4.state, successChance, phStr), C_POS
+    local phStr = phValue and string.format("  pH: %.2f", phValue) or "  pH: ? (press D)"
+    return string.format("State: [%s]  Success: [%s]%s", t4.state, successStr, phStr), C_POS
 end
 
 -- ── Module API ────────────────────────────────────────────────────────────────
