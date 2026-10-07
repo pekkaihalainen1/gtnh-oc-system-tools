@@ -542,7 +542,10 @@ end
 
 local T5_PLASMA_COUNT  = 100   -- mB of Helium Plasma per heating pulse
 local T5_COOLANT_COUNT = 2000  -- mB of Super Coolant per cooling pulse
-local T5_ITERATIONS    = 2     -- heat/cool cycles required per plant cycle
+-- The original tool (written for an earlier GTNH recipe revision) stops at
+-- 2 iterations, which on this build caps success chance at 66% - each
+-- iteration contributes ~33%, so 3 are needed to reach ~100%.
+local T5_ITERATIONS    = 3     -- heat/cool cycles required per plant cycle
 
 local t5 = {
     ready              = false,
