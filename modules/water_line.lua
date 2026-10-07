@@ -1,9 +1,10 @@
 -- Water Line Control module
 -- Automates reagent dosing for the GT5 Water Purification Plant line
--- (Flocculation / pH Neutralization / ... purification units).
+-- (Flocculation / pH Neutralization / Extreme-Temperature / ... purification
+-- units).
 --
 -- Ported from https://github.com/Navatusein/GTNH-OC-Water-Line-Control with
--- two fixes over the original:
+-- fixes over the original:
 --   1. A grade that gets auto-disabled (setWorkAllowed(false)) for running
 --      out of a reagent now re-enables itself once the reagent is restocked,
 --      instead of staying disabled forever.
@@ -15,12 +16,15 @@
 --      T4 (nothing to dose because the pH line was never found). Press [D]
 --      in this module to see the raw sensor lines live if a grade still
 --      won't read correctly.
+--   3. Each grade can be enabled/disabled live from the UI (Up/Down to
+--      select, Enter to toggle) instead of only via config.cfg + restart.
 local component = require("component")
 local computer   = require("computer")
 local keyboard   = require("keyboard")
 local unicode    = require("unicode")
 local sides      = require("sides")
 local ui         = require("lib/ui")
+local _cfg       = require("lib/config")
 
 local M = {}
 M.id   = "water_line"
@@ -36,7 +40,18 @@ M.config = {
         hydrochloricAcidTransposerAddress = "",  -- transposer that provides Hydrochloric Acid
         sodiumHydroxideTransposerAddress  = "",  -- transposer that provides Sodium Hydroxide Dust
     },
+    t5 = {
+        enable                   = false,
+        plasmaTransposerAddress  = "",  -- transposer that provides Helium Plasma
+        coolantTransposerAddress = "",  -- transposer that provides Super Coolant
+    },
 }
+
+local function saveMyConfig()
+    local full = _cfg.load("config.cfg", {})
+    full[M.id] = M.config
+    _cfg.save("config.cfg", full)
+end
 
 -- ── Colors (mirror power_control / dashboard palette) ────────────────────────
 
@@ -356,7 +371,7 @@ local function t3Tick()
 end
 
 local function t3StatusText()
-    if not M.config.t3.enable then return "Disabled (see config.cfg)", C_DIM end
+    if not M.config.t3.enable then return "Disabled (Enter to enable)", C_DIM end
     if not t3.ready then
         if M.config.t3.transposerAddress == "" then
             return "Not configured: set t3.transposerAddress in config.cfg", C_NEG
@@ -500,7 +515,7 @@ local function t4Tick()
 end
 
 local function t4StatusText()
-    if not M.config.t4.enable then return "Disabled (see config.cfg)", C_DIM end
+    if not M.config.t4.enable then return "Disabled (Enter to enable)", C_DIM end
     if not t4.ready then
         if M.config.t4.hydrochloricAcidTransposerAddress == ""
                 or M.config.t4.sodiumHydroxideTransposerAddress == "" then
@@ -519,6 +534,224 @@ local function t4StatusText()
     return string.format("State: [%s]  Success: [%s]%s", t4.state, successStr, phStr), C_POS
 end
 
+-- ── T5: Extreme-Temperature Treated Water (Grade 5) ───────────────────────────
+-- Unlike T3/T4 (one dose per cycle), this unit thermally cycles: heat with
+-- Helium Plasma until temperature >= 10000, cool with Super Coolant back to
+-- <= 0, twice per plant cycle, then wait for the cycle to end. Ported from
+-- the original tool's heating/cooling state machine.
+
+local T5_PLASMA_COUNT  = 100   -- mB of Helium Plasma per heating pulse
+local T5_COOLANT_COUNT = 2000  -- mB of Super Coolant per cooling pulse
+local T5_ITERATIONS    = 2     -- heat/cool cycles required per plant cycle
+
+local t5 = {
+    ready              = false,
+    controller         = nil,
+    plasmaTransposer   = nil,
+    coolantTransposer  = nil,
+    state              = "idle",  -- idle | heating | cooling | waitEnd
+    iterations         = 0,
+    sensor             = {},
+}
+
+local function t5ReadTemperature()
+    return findSensorNumber(t5.sensor, { "temperature", "current temperature" })
+end
+
+local function t5Init()
+    t5.controller = findGtMachine("multimachine.purificationunitplasmaheater")
+    if M.config.t5.plasmaTransposerAddress ~= "" then
+        t5.plasmaTransposer = findTransposer(M.config.t5.plasmaTransposerAddress)
+    end
+    if M.config.t5.coolantTransposerAddress ~= "" then
+        t5.coolantTransposer = findTransposer(M.config.t5.coolantTransposerAddress)
+    end
+    t5.ready = (t5.controller ~= nil) and (t5.plasmaTransposer ~= nil) and (t5.coolantTransposer ~= nil)
+end
+
+-- Forward-declared: these four call into each other (idle -> heating ->
+-- cooling -> heating -> ... -> waitEnd -> idle), so each is assigned as a
+-- plain closure after all four names already exist as locals.
+local t5EnterIdle, t5EnterHeating, t5EnterCooling, t5EnterWaitEnd
+
+t5EnterWaitEnd = function()
+    t5.state = "waitEnd"
+end
+
+t5EnterIdle = function()
+    t5.state = "idle"
+    -- Mid-cycle restart guard: if the plant already has work AND the unit is
+    -- already mid-temperature-swing, don't restart our own heat/cool count -
+    -- just wait for this cycle to end like the original tool does.
+    local temperature = t5ReadTemperature()
+    local okH, hasWork = pcall(t5.controller.hasWork)
+    if okH and hasWork and temperature ~= nil and temperature ~= 0 then
+        t5EnterWaitEnd()
+    end
+end
+
+t5EnterHeating = function()
+    if t5.iterations >= T5_ITERATIONS then
+        t5EnterWaitEnd()
+        return
+    end
+    t5.state = "heating"
+
+    local side, tank = locateFluidSide(t5.plasmaTransposer, "plasma.helium")
+    if not side then
+        pcall(t5.controller.setWorkAllowed, false)
+        warnOnce("t5plasma", "[T5] Could not find Helium Plasma on the configured transposer")
+        return
+    end
+    local okT, _, result = pcall(t5.plasmaTransposer.transferFluid, side, sides.up, T5_PLASMA_COUNT, tank)
+    if not okT or result ~= T5_PLASMA_COUNT then
+        pcall(t5.controller.setWorkAllowed, false)
+        warnOnce("t5plasma", "[T5] Not enough Helium Plasma for craft, pausing until restocked")
+    end
+end
+
+t5EnterCooling = function()
+    t5.state = "cooling"
+
+    local side, tank = locateFluidSide(t5.coolantTransposer, "supercoolant")
+    if not side then
+        pcall(t5.controller.setWorkAllowed, false)
+        warnOnce("t5coolant", "[T5] Could not find Super Coolant on the configured transposer")
+        return
+    end
+    local okT, _, result = pcall(t5.coolantTransposer.transferFluid, side, sides.up, T5_COOLANT_COUNT, tank)
+    if not okT or result ~= T5_COOLANT_COUNT then
+        pcall(t5.controller.setWorkAllowed, false)
+        warnOnce("t5coolant", "[T5] Not enough Super Coolant for craft, pausing until restocked")
+    end
+end
+
+-- See t3TryRecover's comment: gate on the multiblock's real isWorkAllowed()
+-- state, not an in-memory flag, so a shortage-disable from a previous run
+-- can still self-heal after a restart. T5 needs both reagents present
+-- before re-enabling since either one can be the one that ran out.
+local function t5TryRecover()
+    local okW, workAllowed = pcall(t5.controller.isWorkAllowed)
+    if not okW or workAllowed ~= false then return end
+    local plasmaSide  = locateFluidSide(t5.plasmaTransposer, "plasma.helium")
+    local coolantSide = locateFluidSide(t5.coolantTransposer, "supercoolant")
+    if plasmaSide and coolantSide then
+        local okE = pcall(t5.controller.setWorkAllowed, true)
+        if okE then
+            _lastWarn.t5plasma  = nil
+            _lastWarn.t5coolant = nil
+            addLog("[T5] Reagents restocked, controller re-enabled", "info")
+        end
+    end
+end
+
+local function t5Tick()
+    if not M.config.t5.enable then return end
+
+    if not t5.ready then
+        t5Init()
+        if not t5.ready then return end
+        addLog("[T5] Extreme Temperature Fluctuation Purification Unit found", "info")
+        t5EnterIdle()
+    end
+
+    local okS, sensor = pcall(t5.controller.getSensorInformation)
+    t5.sensor = (okS and type(sensor) == "table") and sensor or {}
+
+    local ok, err = pcall(function()
+        if t5.state == "waitEnd" then
+            if plant.cycleEnded then t5EnterIdle() end
+            return
+        end
+
+        if t5.state == "idle" then
+            t5TryRecover()
+
+            local okP, progress = pcall(t5.controller.getWorkProgress)
+            if okP and progress and progress > 900 then
+                t5EnterWaitEnd()
+                return
+            end
+
+            local okH, hasWork = pcall(t5.controller.hasWork)
+            if okH and hasWork then
+                t5.iterations = 0
+                t5EnterHeating()
+            end
+        elseif t5.state == "heating" then
+            local okH, hasWork = pcall(t5.controller.hasWork)
+            if okH and not hasWork then
+                t5EnterIdle()
+                return
+            end
+            local temperature = t5ReadTemperature()
+            if temperature ~= nil and temperature >= 10000 then
+                t5EnterCooling()
+            end
+        elseif t5.state == "cooling" then
+            local okH, hasWork = pcall(t5.controller.hasWork)
+            if okH and not hasWork then
+                t5EnterIdle()
+                return
+            end
+            local temperature = t5ReadTemperature()
+            if temperature ~= nil and temperature <= 0 then
+                t5.iterations = t5.iterations + 1
+                t5EnterHeating()
+            end
+        end
+    end)
+
+    if not ok then
+        t5.ready = false
+        warnOnce("t5err", "[T5] " .. tostring(err))
+    end
+end
+
+local function t5StatusText()
+    if not M.config.t5.enable then return "Disabled (Enter to enable)", C_DIM end
+    if not t5.ready then
+        if M.config.t5.plasmaTransposerAddress == "" or M.config.t5.coolantTransposerAddress == "" then
+            return "Not configured: set t5.*TransposerAddress in config.cfg", C_NEG
+        end
+        return "Searching for hardware...", C_DIM
+    end
+    local okW, workAllowed = pcall(t5.controller.isWorkAllowed)
+    if okW and workAllowed == false then return "Controller disabled (low stock)", C_NEG end
+    local okH, hasWork = pcall(t5.controller.hasWork)
+    if not (okH and hasWork) then return "Wait cycle", C_DIM end
+    local successChance = findSensorNumber(t5.sensor, { "success_chance", "success chance" })
+    local successStr = successChance and string.format("%d%%", successChance) or "N/A (press D)"
+    local temperature = t5ReadTemperature()
+    local tempStr = temperature and string.format("  Temp: %dK", temperature) or "  Temp: ? (press D)"
+    return string.format("State: [%s]  Success: [%s]%s", t5.state, successStr, tempStr), C_POS
+end
+
+-- ── Grade registry (enable-toggle UI) ─────────────────────────────────────────
+-- Drives the Up/Down-select, Enter-to-toggle UI and the status rows. Each
+-- grade's own dosing/state-machine logic stays separate above (T3/T4/T5 are
+-- different enough GT recipes that a shared abstraction would be forced) -
+-- this registry only unifies what's actually common: its config, its runtime
+-- state table (to flip setWorkAllowed on toggle), and its status line.
+
+local GRADES = {
+    { key = "t3", label = "T3  Grade 3 (Floc) ", cfg = function() return M.config.t3 end, state = t3, statusFn = t3StatusText },
+    { key = "t4", label = "T4  Grade 4 (pH)   ", cfg = function() return M.config.t4 end, state = t4, statusFn = t4StatusText },
+    { key = "t5", label = "T5  Grade 5 (Temp) ", cfg = function() return M.config.t5 end, state = t5, statusFn = t5StatusText },
+}
+
+local cursorIdx = 1
+
+local function toggleGradeEnable(g)
+    local cfg = g.cfg()
+    cfg.enable = not cfg.enable
+    pcall(saveMyConfig)
+    addLog("[" .. g.key:upper() .. "] " .. (cfg.enable and "Enabled" or "Disabled"), "info")
+    if g.state.controller then
+        pcall(g.state.controller.setWorkAllowed, cfg.enable)
+    end
+end
+
 -- ── Module API ────────────────────────────────────────────────────────────────
 
 function M.init(gpu, screenW, screenH)
@@ -532,24 +765,41 @@ function M.update()
     plantTick()
     t3Tick()
     t4Tick()
+    t5Tick()
 end
 
 function M.stop()
-    pcall(function()
-        if t3.controller then t3.controller.setWorkAllowed(false) end
-    end)
-    pcall(function()
-        if t4.controller then t4.controller.setWorkAllowed(false) end
-    end)
+    for _, g in ipairs(GRADES) do
+        pcall(function()
+            if g.state.controller then g.state.controller.setWorkAllowed(false) end
+        end)
+    end
 end
 
 -- ── drawUI ────────────────────────────────────────────────────────────────────
 
-local function drawGradeRow(gpu, cx, row, w, label, statusText, statusColor)
+local function drawPlantRow(gpu, cx, row, w, label, statusText, statusColor)
     gpu.setForeground(C_LABEL)
     gpu.set(cx, row, label)
     gpu.setForeground(statusColor or C_VALUE)
     local vx = cx + unicode.len(label) + 1
+    gpu.set(vx, row, unicode.sub(statusText, 1, math.max(0, w - (vx - cx) - 2)))
+end
+
+-- Cursor marker + [x]/[ ] enable checkbox + label + status, for one grade row.
+local function drawGradeToggleRow(gpu, cx, row, w, grade, isSelected)
+    local cfg = grade.cfg()
+    local prefix = (isSelected and "> " or "  ") .. (cfg.enable and "[x] " or "[ ] ")
+    gpu.setForeground(isSelected and C_LABEL or C_DIM)
+    gpu.set(cx, row, prefix)
+
+    local labelX = cx + unicode.len(prefix)
+    gpu.setForeground(C_LABEL)
+    gpu.set(labelX, row, grade.label .. ":")
+
+    local statusText, statusColor = grade.statusFn()
+    gpu.setForeground(statusColor or C_VALUE)
+    local vx = labelX + unicode.len(grade.label) + 1
     gpu.set(vx, row, unicode.sub(statusText, 1, math.max(0, w - (vx - cx) - 2)))
 end
 
@@ -594,13 +844,14 @@ function M.drawUI(gpu, x, y, w, h)
     end
 
     row = row + 2
-    drawGradeRow(gpu, cx, row, w, "PLANT              :", plantStatusText())
+    drawPlantRow(gpu, cx, row, w, "PLANT              :", plantStatusText())
     row = row + 2
-    drawGradeRow(gpu, cx, row, w, "T3  Grade 3 (Floc) :", t3StatusText())
-    row = row + 1
-    drawGradeRow(gpu, cx, row, w, "T4  Grade 4 (pH)   :", t4StatusText())
+    for i, g in ipairs(GRADES) do
+        drawGradeToggleRow(gpu, cx, row, w, g, i == cursorIdx)
+        row = row + 1
+    end
 
-    row = row + 2
+    row = row + 1
     gpu.setForeground(C_SEP)
     gpu.fill(cx, row, w - 4, 1, "─")
     row = row + 1
@@ -617,6 +868,9 @@ function M.drawUI(gpu, x, y, w, h)
         end
         if M.config.t4.enable then
             row = drawRawSensor(gpu, cx, row, panelEnd, "T4 (pH Neutralization Purification Unit):", t4.sensor)
+        end
+        if M.config.t5.enable then
+            row = drawRawSensor(gpu, cx, row, panelEnd, "T5 (Extreme Temperature Fluctuation Purification Unit):", t5.sensor)
         end
     else
         gpu.setForeground(C_TITLE)
@@ -642,14 +896,23 @@ function M.drawUI(gpu, x, y, w, h)
     gpu.fill(cx, footRow - 1, w - 4, 1, "─")
     gpu.setForeground(C_DIM)
     gpu.set(cx, footRow,
-        "[D] " .. (debugView and "Show log" or "Show raw sensor lines") .. "     [Q] Quit     [Tab] Switch tab")
+        "[Up/Down] Select  [Enter] Enable/Disable  [D] "
+            .. (debugView and "Show log" or "Show raw sensor")
+            .. "  [Q] Quit  [Tab] Switch tab")
 
     gpu.setForeground(C_VALUE)
     gpu.setBackground(0x000000)
 end
 
 function M.handleKey(char, code)
-    if char == 100 or char == 68 then  -- 'd' / 'D'
+    if code == keyboard.keys.up then
+        cursorIdx = math.max(1, cursorIdx - 1)
+    elseif code == keyboard.keys.down then
+        cursorIdx = math.min(#GRADES, cursorIdx + 1)
+    elseif code == keyboard.keys.enter then
+        local g = GRADES[cursorIdx]
+        if g then toggleGradeEnable(g) end
+    elseif char == 100 or char == 68 then  -- 'd' / 'D'
         debugView = not debugView
     end
 end
