@@ -164,6 +164,53 @@ local function locateItemSide(proxy, labelPattern)
     return nil
 end
 
+-- Dumps every non-empty tank/slot on a transposer for live debugging. A
+-- mismatch between our fluid/item name search pattern and what this GTNH
+-- build actually reports (as happened with T4's pH and T5's Helium Plasma)
+-- is otherwise invisible: locateFluidSide/locateItemSide just silently find
+-- nothing, with no way to see what the real name is. Shown under [D].
+local function dumpTransposerFluids(proxy)
+    local result = {}
+    if not proxy then return result end
+    for side = 0, 5 do
+        local okC, tankCount = pcall(proxy.getTankCount, side)
+        if okC and tankCount and tankCount > 0 then
+            for tank = 1, tankCount do
+                local okF, fluid = pcall(proxy.getFluidInTank, side, tank)
+                if okF and type(fluid) == "table" and fluid.amount and fluid.amount > 0 then
+                    result[#result + 1] = string.format(
+                        "side %d tank %d: %s (name=%s) x%d",
+                        side, tank, tostring(fluid.label or "?"), tostring(fluid.name or "?"), fluid.amount)
+                end
+            end
+        end
+    end
+    if #result == 0 then result[1] = "(all tanks empty or unreadable)" end
+    return result
+end
+
+local function dumpTransposerItems(proxy)
+    local result = {}
+    if not proxy then return result end
+    for side = 0, 5 do
+        local okS, stacks = pcall(proxy.getAllStacks, side)
+        if okS and stacks then
+            local okA, all = pcall(stacks.getAll)
+            if okA and all then
+                for slot, item in pairs(all) do
+                    if type(item) == "table" and item.label and item.size and item.size > 0 then
+                        result[#result + 1] = string.format(
+                            "side %d slot %d: %s (name=%s) x%d",
+                            side, slot + 1, tostring(item.label), tostring(item.name or "?"), item.size)
+                    end
+                end
+            end
+        end
+    end
+    if #result == 0 then result[1] = "(all slots empty or unreadable)" end
+    return result
+end
+
 -- ── Sensor parsing ────────────────────────────────────────────────────────────
 -- Strip Minecraft "§x" color codes, then search EVERY line for a label
 -- substring instead of trusting a fixed line index. This is what makes
@@ -871,6 +918,26 @@ function M.drawUI(gpu, x, y, w, h)
         end
         if M.config.t5.enable then
             row = drawRawSensor(gpu, cx, row, panelEnd, "T5 (Extreme Temperature Fluctuation Purification Unit):", t5.sensor)
+        end
+
+        if M.config.t3.enable and t3.transposer then
+            row = drawRawSensor(gpu, cx, row, panelEnd, "T3 transposer tanks:", dumpTransposerFluids(t3.transposer))
+        end
+        if M.config.t4.enable then
+            if t4.acidTransposer then
+                row = drawRawSensor(gpu, cx, row, panelEnd, "T4 acid transposer tanks:", dumpTransposerFluids(t4.acidTransposer))
+            end
+            if t4.hydroxideTransposer then
+                row = drawRawSensor(gpu, cx, row, panelEnd, "T4 hydroxide transposer items:", dumpTransposerItems(t4.hydroxideTransposer))
+            end
+        end
+        if M.config.t5.enable then
+            if t5.plasmaTransposer then
+                row = drawRawSensor(gpu, cx, row, panelEnd, "T5 plasma transposer tanks:", dumpTransposerFluids(t5.plasmaTransposer))
+            end
+            if t5.coolantTransposer then
+                row = drawRawSensor(gpu, cx, row, panelEnd, "T5 coolant transposer tanks:", dumpTransposerFluids(t5.coolantTransposer))
+            end
         end
     else
         gpu.setForeground(C_TITLE)
