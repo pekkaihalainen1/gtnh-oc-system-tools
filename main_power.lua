@@ -1,4 +1,4 @@
--- GTNH OC System Tools — main shell
+-- GTNH OC System Tools — main shell (Power Control system)
 -- Manages modules, tab UI, and event loop.
 -- Modules expose update() which is called each loop tick.
 
@@ -13,7 +13,6 @@ local ui        = require("lib/ui")
 local MODULES = {
     require("modules/dashboard"),
     require("modules/power_control"),
-    require("modules/item_stocker"),
 }
 
 -- ── Config ───────────────────────────────────────────────────────────────────

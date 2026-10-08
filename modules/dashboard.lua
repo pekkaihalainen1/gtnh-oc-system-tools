@@ -1,8 +1,6 @@
--- Dashboard module: read-only overview of power state and crafting history.
--- Has no logic of its own; pulls data from power_control and item_stocker
--- via their public accessors.
-local unicode  = require("unicode")
-local keyboard = require("keyboard")
+-- Dashboard module: read-only overview of power state.
+-- Has no logic of its own; pulls data from power_control via its public
+-- accessors.
 local computer = require("computer")
 local ui       = require("lib/ui")
 
@@ -11,10 +9,9 @@ M.id     = "dashboard"
 M.name   = "Dashboard"
 M.config = {}
 
--- ── Cross-module lazy references ─────────────────────────────────────────────
+-- ── Cross-module lazy reference ───────────────────────────────────────────────
 
-local _power   = nil
-local _stocker = nil
+local _power = nil
 
 local function getPower()
     if not _power then
@@ -22,14 +19,6 @@ local function getPower()
         if ok and m then _power = m end
     end
     return _power
-end
-
-local function getStocker()
-    if not _stocker then
-        local ok, m = pcall(require, "modules/item_stocker")
-        if ok and m then _stocker = m end
-    end
-    return _stocker
 end
 
 -- ── Colors (mirror power_control palette) ────────────────────────────────────
@@ -52,14 +41,7 @@ end
 function M.start() end
 function M.update() end
 function M.stop() end
-function M.handleKey(char, code)
-    if code == keyboard.keys.delete then
-        local stocker = getStocker()
-        if stocker and stocker.clearHistory then
-            stocker.clearHistory()
-        end
-    end
-end
+function M.handleKey(char, code) end
 
 -- ── drawUI ───────────────────────────────────────────────────────────────────
 
@@ -187,58 +169,7 @@ function M.drawUI(gpu, x, y, w, h)
         "ON >%.0f%%  ·  OFF <%.0f%%  ·  Side: %d",
         cfg.highThreshold * 100, cfg.lowThreshold * 100, cfg.redstoneSide))
 
-    -- ── Crafting History ─────────────────────────────────────────────────────
-    row = row + 2
-    gpu.setForeground(C_TITLE)
-    gpu.set(cx, row, "CRAFTING HISTORY")
-    gpu.setForeground(C_SEP)
-    local hsepStart = cx + 17
-    local hsepEnd   = x + w - 2
-    if hsepEnd > hsepStart then
-        gpu.fill(hsepStart, row, hsepEnd - hsepStart, 1, "─")
-    end
-
-    local stocker = getStocker()
-    local hist = (stocker and stocker.getHistory) and stocker.getHistory() or {}
-    local histStart = row + 2
-    local histEnd   = y + h - 3
-    local maxRows   = math.max(0, histEnd - histStart + 1)
-    local startIdx  = math.max(1, #hist - maxRows + 1)
-    local rightW    = 16
-    local labelW    = w - 4 - 9 - rightW - 1
-
-    for i = startIdx, #hist do
-        local e = hist[i]
-        local r = histStart + (i - startIdx)
-        if r > histEnd then break end
-        gpu.setForeground(C_DIM)
-        gpu.set(cx, r, e.when)
-        gpu.setForeground(C_VALUE)
-        gpu.set(cx + 9, r, unicode.sub(e.label, 1, labelW))
-        local statusColor = (e.status == "done")    and 0x44CC44   -- green
-                         or (e.status == "queued")  and 0xBBAA22   -- dull yellow (awaiting confirm)
-                         or (e.status == "running") and 0xBBAA22   -- dull yellow (confirmed active)
-                         or 0xBB3333                                -- dull red (err/stalled/timeout/cancelled/failed)
-        gpu.setForeground(statusColor)
-        local right
-        if ui.isDrop(e.label) then
-            right = string.format("%6s %-7s", ui.formatDrop(e.amount), e.status:sub(1, 7))
-        else
-            right = string.format("%5dx %-7s", e.amount, e.status:sub(1, 7))
-        end
-        gpu.set(x + w - 1 - rightW, r, right)
-    end
-
     -- ── Footer hint ──────────────────────────────────────────────────────────
-    local nextIn = (stocker and stocker.getNextCheckIn) and stocker.getNextCheckIn() or nil
-    local stockStr
-    if nextIn == nil then
-        stockStr = "Stock: no ME"
-    elseif nextIn == 0 then
-        stockStr = "Stock: checking..."
-    else
-        stockStr = string.format("Stock: %ds", nextIn)
-    end
     -- Memory indicator: free / total KB. Helpful when diagnosing OOM.
     local memFree  = math.floor(computer.freeMemory() / 1024)
     local memTotal = math.floor(computer.totalMemory() / 1024)
@@ -246,8 +177,7 @@ function M.drawUI(gpu, x, y, w, h)
 
     gpu.setForeground(C_DIM)
     gpu.set(cx, y + h - 1,
-        string.format("Interval: %ds  %s  %s  [Del] Clear  [Q] Quit  [Tab] Switch",
-            cfg.checkInterval, stockStr, memStr))
+        string.format("Interval: %ds  %s  [Q] Quit  [Tab] Switch", cfg.checkInterval, memStr))
 
     -- ── Error overlay ────────────────────────────────────────────────────────
     if status.error then
