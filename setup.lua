@@ -240,9 +240,20 @@ io.write("Select system to install:\n")
 io.write("  [1] Power  - power control only\n")
 io.write("  [2] Stock  - item/fluid stocking only\n")
 io.write("  [3] Water  - GT water purification line automation (grade 3/4/5)\n")
-io.write("Choice [1]: ")
-local choice = (io.read() or ""):gsub("%s+", "")
-local system = (choice == "2") and "stock" or (choice == "3") and "water" or "power"
+
+-- No default: a blank/invalid answer (e.g. an accidental Enter) must not
+-- silently install the wrong system, especially now that Power and Stock
+-- are mutually exclusive rather than Power being a superset of Stock.
+local SYSTEM_BY_CHOICE = { ["1"] = "power", ["2"] = "stock", ["3"] = "water" }
+local system = nil
+while not system do
+    io.write("Choice (1-3): ")
+    local choice = (io.read() or ""):gsub("%s+", "")
+    system = SYSTEM_BY_CHOICE[choice]
+    if not system then
+        io.write("Invalid choice '" .. choice .. "' - enter 1, 2, or 3.\n")
+    end
+end
 io.write("Installing: " .. system .. "\n\n")
 
 local files = FILES[system]
